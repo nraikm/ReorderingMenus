@@ -68,6 +68,7 @@ plugin_instance:addToMainMenu(mock_menu_items)
 assert_true(mock_menu_items.reordering_menus ~= nil, "addToMainMenu added reordering_menus")
 assert_eq(mock_menu_items.reordering_menus.sorting_hint, "more_tools", "Sorting hint is more_tools")
 assert_true(type(mock_menu_items.reordering_menus.callback) == "function", "Main menu uses direct reorder callback")
+assert_true(type(plugin_instance.showReorderScreen) == "function", "Plugin exposes its reorder screen opener")
 
 -- Regression: the direct callback must pass the active view. Without it,
 -- MenuOrderManager tries to require ui/elements/nil_menu_order and KOReader exits.

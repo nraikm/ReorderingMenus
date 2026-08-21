@@ -33,12 +33,16 @@ function ReorderingMenus:onShowFileManager()
     UIScreens.current_view = "filemanager"
 end
 
+function ReorderingMenus:showReorderScreen()
+    UIScreens:showTabReorderDialog(self, UIScreens:getCurrentView(self))
+end
+
 function ReorderingMenus:addToMainMenu(menu_items)
     menu_items.reordering_menus = {
         text = _("Reorder menus"),
         sorting_hint = "more_tools",
         callback = function()
-            UIScreens:showTabReorderDialog(self, UIScreens:getCurrentView(self))
+            self:showReorderScreen()
         end,
     }
 end

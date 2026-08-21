@@ -10,6 +10,7 @@ package.path = project_dir .. "/?.lua;" .. package.path
 local LuaSettings = require("luasettings")
 local DataStorage = require("datastorage")
 local lfs = require("libs/libkoreader-lfs")
+local util = require("util")
 
 G_reader_settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/settings.reader.lua")
 G_defaults = require("luadefaults"):open()
@@ -118,8 +119,67 @@ for __, p in ipairs(user_presets) do
 end
 assert_eq(found, false, "User preset no longer in list")
 
--- 8. Test Presets UI Screens
-print("\n--- Test 8: Presets UI Screens Simulation ---")
+-- 8. Test Submenu Presets
+print("\n--- Test 8: Submenu Presets ---")
+local direct_preset_name = "Unit_Test_Navigation_Direct"
+local nested_preset_name = "Unit_Test_Navigation_Nested"
+MenuOrderManager:deleteSubmenuPreset("reader", "navi", direct_preset_name)
+MenuOrderManager:deleteSubmenuPreset("reader", "navi", nested_preset_name)
+MenuOrderManager:resetOrder("reader")
+
+local default_order = MenuOrderManager:getDefaultOrder("reader")
+local desired_navi = util.tableDeepCopy(default_order.navi)
+local desired_navi_settings = util.tableDeepCopy(default_order.navi_settings)
+desired_navi[1], desired_navi[2] = desired_navi[2], desired_navi[1]
+desired_navi_settings[1], desired_navi_settings[2] = desired_navi_settings[2], desired_navi_settings[1]
+
+local working_order = MenuOrderManager:loadOrder("reader")
+working_order.navi = util.tableDeepCopy(desired_navi)
+working_order.navi_settings = util.tableDeepCopy(desired_navi_settings)
+
+ok, path = MenuOrderManager:saveSubmenuPreset(
+    "reader", "navi", "Navigation", direct_preset_name, false
+)
+assert_true(ok and lfs.attributes(path) ~= nil, "Direct submenu preset saved")
+ok, path = MenuOrderManager:saveSubmenuPreset(
+    "reader", "navi", "Navigation", nested_preset_name, true
+)
+assert_true(ok and lfs.attributes(path) ~= nil, "Nested submenu preset saved")
+
+local submenu_presets = MenuOrderManager:listSubmenuPresets("reader", "navi")
+local direct_preset
+local nested_preset
+for _, preset in ipairs(submenu_presets) do
+    if preset.name == direct_preset_name then direct_preset = preset end
+    if preset.name == nested_preset_name then nested_preset = preset end
+end
+assert_true(direct_preset ~= nil and not direct_preset.include_submenus, "Direct preset is scoped to one menu")
+assert_true(nested_preset ~= nil and nested_preset.include_submenus, "Nested preset records recursive scope")
+assert_true(nested_preset and nested_preset.menu_count >= 2, "Nested preset captures child submenu order")
+
+working_order.navi = util.tableDeepCopy(default_order.navi)
+table.insert(working_order.navi, "new_plugin_navigation_item")
+working_order.navi_settings = util.tableDeepCopy(default_order.navi_settings)
+load_ok, err = MenuOrderManager:loadSubmenuPreset("reader", "navi", direct_preset)
+assert_true(load_ok, "Direct submenu preset loaded")
+assert_eq(working_order.navi[1], desired_navi[1], "Direct preset restores root submenu order")
+assert_eq(working_order.navi_settings[1], default_order.navi_settings[1], "Direct preset leaves nested submenu unchanged")
+assert_eq(working_order.navi[#working_order.navi], "new_plugin_navigation_item", "Direct preset preserves new plugin items")
+
+working_order.navi = util.tableDeepCopy(default_order.navi)
+table.insert(working_order.navi, "new_plugin_navigation_item")
+working_order.navi_settings = util.tableDeepCopy(default_order.navi_settings)
+load_ok, err = MenuOrderManager:loadSubmenuPreset("reader", "navi", nested_preset)
+assert_true(load_ok, "Nested submenu preset loaded")
+assert_eq(working_order.navi[1], desired_navi[1], "Nested preset restores root submenu order")
+assert_eq(working_order.navi_settings[1], desired_navi_settings[1], "Nested preset restores child submenu order")
+assert_eq(working_order.navi[#working_order.navi], "new_plugin_navigation_item", "Nested preset preserves new plugin items")
+
+assert_true(MenuOrderManager:deleteSubmenuPreset("reader", "navi", direct_preset), "Direct submenu preset deleted")
+assert_true(MenuOrderManager:deleteSubmenuPreset("reader", "navi", nested_preset), "Nested submenu preset deleted")
+
+-- 9. Test Presets UI Screens
+print("\n--- Test 9: Presets UI Screens Simulation ---")
 local mock_ui = {
     document = { file = "test.epub" },
     doc_settings = { isTrue = function() return false end, makeFalse = function() end, makeTrue = function() end },
@@ -149,6 +209,33 @@ ui_ok, ui_err = pcall(function()
     UIManager:close(menu)
 end)
 assert_true(ui_ok, "showLoadPresetMenu opened and closed cleanly: " .. tostring(ui_err))
+
+ui_ok, ui_err = pcall(function()
+    UIScreens:showSubmenuPresetsMenu(plugin, "reader", "tools", "Tools")
+    local top_entry = UIManager._window_stack[#UIManager._window_stack]
+    local menu = (top_entry and top_entry.widget) or top_entry
+    assert_true(menu ~= nil and menu.title == "Presets for Tools", "Submenu preset manager opened for its menu name")
+    assert_eq(menu.item_table[1].text, "Save this menu order…", "Direct-only save is the default option")
+    assert_eq(menu.item_table[2].text, "Save with nested submenu orders…", "Nested submenu capture is offered separately")
+    UIManager:close(menu)
+end)
+assert_true(ui_ok, "showSubmenuPresetsMenu opened and closed cleanly: " .. tostring(ui_err))
+
+ui_ok, ui_err = pcall(function()
+    MenuOrderManager:saveSubmenuPreset("reader", "tools", "Tools", direct_preset_name, false)
+    MenuOrderManager:saveSubmenuPreset("reader", "tools", "Tools", nested_preset_name, true)
+    UIScreens:showDeleteSubmenuPresetMenu(plugin, "reader", "tools", "Tools")
+    local top_entry = UIManager._window_stack[#UIManager._window_stack]
+    local menu = (top_entry and top_entry.widget) or top_entry
+    local labels = {}
+    for _, item in ipairs(menu.item_table or {}) do labels[item.text] = true end
+    assert_true(labels["[Direct] " .. direct_preset_name], "Delete list labels direct presets")
+    assert_true(labels["[Nested] " .. nested_preset_name], "Delete list labels nested presets")
+    UIManager:close(menu)
+    MenuOrderManager:deleteSubmenuPreset("reader", "tools", direct_preset_name)
+    MenuOrderManager:deleteSubmenuPreset("reader", "tools", nested_preset_name)
+end)
+assert_true(ui_ok, "Delete submenu preset labels rendered cleanly: " .. tostring(ui_err))
 
 -- Reset to clean defaults
 MenuOrderManager:resetOrder("reader")

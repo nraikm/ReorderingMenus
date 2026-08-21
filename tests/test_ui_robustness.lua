@@ -180,6 +180,7 @@ local ok, err = pcall(function()
 
     local submenu_reset_found = false
     local selected_submenu_reset_found = false
+    local submenu_presets_callback
     local sort_a_index
     local sort_z_index
     local button_index = 0
@@ -188,6 +189,8 @@ local ok, err = pcall(function()
             button_index = button_index + 1
             if button.text == "Reset Tools menu" then
                 submenu_reset_found = true
+            elseif button.text == "Presets for Tools…" then
+                submenu_presets_callback = button.callback
             elseif selected_submenu_title and button.text == "Reset " .. selected_submenu_title .. " menu" then
                 selected_submenu_reset_found = true
             elseif button.text == "Sort A to Z" then
@@ -199,6 +202,7 @@ local ok, err = pcall(function()
     end
     assert_true(submenu_reset_found, "Submenu reset names the current menu")
     assert_true(selected_submenu_reset_found, "Marked nested submenu gets its own reset action")
+    assert_true(submenu_presets_callback ~= nil, "Submenu hamburger exposes presets for the current menu")
     assert_eq(sort_z_index, sort_a_index + 1, "Sort actions remain next to each other")
 
     -- Simulate tapping "Add separator at bottom" (button 1)

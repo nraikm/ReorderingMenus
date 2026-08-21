@@ -581,6 +581,210 @@ function MenuOrderManager:getPresetsDir(view)
     return view_dir
 end
 
+local function cleanPresetName(preset_name)
+    if not preset_name or preset_name:match("^%s*$") then
+        return nil, _("Preset name cannot be empty.")
+    end
+    local clean_name = preset_name:gsub("[^%w_%- %.]", ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if clean_name == "" then
+        return nil, _("Invalid preset name.")
+    end
+    return clean_name
+end
+
+local function cleanPathComponent(value)
+    local clean_value = tostring(value or ""):gsub("[^%w_%-]", "_")
+    return clean_value ~= "" and clean_value or "submenu"
+end
+
+function MenuOrderManager:getSubmenuPresetsDir(view, menu_id)
+    local root_dir = string.format("%s/submenus", self:getPresetsDir(view))
+    if not lfs.attributes(root_dir) then
+        util.makePath(root_dir)
+    end
+    local menu_dir = string.format("%s/%s", root_dir, cleanPathComponent(menu_id))
+    if not lfs.attributes(menu_dir) then
+        util.makePath(menu_dir)
+    end
+    return menu_dir
+end
+
+local function collectSubmenuOrders(order, default_order, menu_id, include_nested, menus, visited)
+    if visited[menu_id] or type(order[menu_id]) ~= "table" then return end
+    visited[menu_id] = true
+    menus[menu_id] = util.tableDeepCopy(order[menu_id])
+    if not include_nested then return end
+
+    local children = {}
+    for _, item_id in ipairs(order[menu_id]) do
+        if type(order[item_id]) == "table" then
+            children[item_id] = true
+        end
+    end
+
+    -- A hidden submenu is removed from its parent list. Include it when it is
+    -- disabled, but do not pull in a submenu that was deliberately moved.
+    local disabled = {}
+    for _, item_id in ipairs(order["KOMenu:disabled"] or {}) do
+        disabled[item_id] = true
+    end
+    for _, item_id in ipairs(default_order[menu_id] or {}) do
+        if disabled[item_id] and type(order[item_id]) == "table" then
+            children[item_id] = true
+        end
+    end
+
+    for child_id in pairs(children) do
+        collectSubmenuOrders(order, default_order, child_id, true, menus, visited)
+    end
+end
+
+function MenuOrderManager:saveSubmenuPreset(view, menu_id, menu_title, preset_name, include_nested, current_menu_items)
+    local clean_name, name_err = cleanPresetName(preset_name)
+    if not clean_name then return false, name_err end
+
+    local order = self:loadOrder(view)
+    if type(order[menu_id]) ~= "table" then
+        return false, _("Submenu not found.")
+    end
+
+    local menus = {}
+    collectSubmenuOrders(order, self:getDefaultOrder(view), menu_id, include_nested == true, menus, {})
+    if type(current_menu_items) == "table" then
+        menus[menu_id] = util.tableDeepCopy(current_menu_items)
+    end
+    local preset_data = {
+        format = "reorderingmenus_submenu_preset",
+        version = 1,
+        name = clean_name,
+        menu_id = menu_id,
+        menu_title = menu_title or menu_id,
+        include_submenus = include_nested == true,
+        menus = menus,
+    }
+    local file_path = string.format("%s/%s.lua", self:getSubmenuPresetsDir(view, menu_id), clean_name)
+    local ok, err = util.writeToFile(dump(preset_data, nil, true), file_path, true, true)
+    if not ok then return false, err end
+    return true, file_path
+end
+
+function MenuOrderManager:listSubmenuPresets(view, menu_id)
+    local dir = self:getSubmenuPresetsDir(view, menu_id)
+    local presets = {}
+    for file in lfs.dir(dir) do
+        if file:sub(-4) == ".lua" and file:sub(1, 1) ~= "." then
+            local path = string.format("%s/%s", dir, file)
+            local ok, data = pcall(dofile, path)
+            if ok and type(data) == "table"
+                    and data.format == "reorderingmenus_submenu_preset"
+                    and data.menu_id == menu_id and type(data.menus) == "table" then
+                local menu_count = 0
+                for _ in pairs(data.menus) do menu_count = menu_count + 1 end
+                table.insert(presets, {
+                    id = "submenu_" .. file:sub(1, -5),
+                    name = data.name or file:sub(1, -5),
+                    description = data.include_submenus
+                        and string.format(_("Order for this menu and %d nested menu(s)"), math.max(0, menu_count - 1))
+                        or _("Order for this menu only"),
+                    include_submenus = data.include_submenus == true,
+                    menu_count = menu_count,
+                    path = path,
+                })
+            end
+        end
+    end
+    table.sort(presets, function(a, b) return a.name:lower() < b.name:lower() end)
+    return presets
+end
+
+local function mergeCapturedOrder(captured, current)
+    local current_items = {}
+    for _, item_id in ipairs(current) do
+        if item_id ~= SEPARATOR_ID then current_items[item_id] = true end
+    end
+
+    local merged = {}
+    local used = {}
+    for _, item_id in ipairs(captured) do
+        if item_id == SEPARATOR_ID then
+            table.insert(merged, item_id)
+        elseif current_items[item_id] and not used[item_id] then
+            used[item_id] = true
+            table.insert(merged, item_id)
+        end
+    end
+    -- Preserve entries introduced after the preset was saved (for example by
+    -- newly installed plugins) and place them after the captured ordering.
+    for _, item_id in ipairs(current) do
+        if item_id ~= SEPARATOR_ID and not used[item_id] then
+            used[item_id] = true
+            table.insert(merged, item_id)
+        end
+    end
+    return merged
+end
+
+function MenuOrderManager:loadSubmenuPreset(view, menu_id, preset, current_menu_items)
+    local data
+    if type(preset) == "table" and preset.menus then
+        data = preset
+    elseif type(preset) == "table" and preset.path then
+        local ok, result = pcall(dofile, preset.path)
+        if ok then data = result end
+    elseif type(preset) == "string" then
+        local path = string.format("%s/%s.lua", self:getSubmenuPresetsDir(view, menu_id), preset)
+        local ok, result = pcall(dofile, path)
+        if ok then data = result end
+    end
+
+    if type(data) ~= "table" or data.format ~= "reorderingmenus_submenu_preset"
+            or data.menu_id ~= menu_id or type(data.menus) ~= "table"
+            or type(data.menus[menu_id]) ~= "table" then
+        return false, _("Submenu preset not found or does not match this menu.")
+    end
+
+    local order = self:loadOrder(view)
+    if type(order[menu_id]) ~= "table" then
+        return false, _("Submenu not found.")
+    end
+    local previous_order = util.tableDeepCopy(order)
+    for captured_menu_id, captured_items in pairs(data.menus) do
+        if type(captured_items) == "table" and type(order[captured_menu_id]) == "table" then
+            local current_items = order[captured_menu_id]
+            if captured_menu_id == menu_id and type(current_menu_items) == "table" then
+                current_items = current_menu_items
+            end
+            order[captured_menu_id] = mergeCapturedOrder(captured_items, current_items)
+        end
+    end
+
+    local ok, result = self:saveOrder(view)
+    if not ok then
+        self.orders[view] = previous_order
+        return false, result
+    end
+    return true, result
+end
+
+function MenuOrderManager:deleteSubmenuPreset(view, menu_id, preset)
+    local path
+    if type(preset) == "table" then
+        path = preset.path
+    elseif type(preset) == "string" then
+        local clean_name, name_err = cleanPresetName(preset:gsub("^submenu_", ""))
+        if not clean_name then return false, name_err end
+        path = string.format("%s/%s.lua", self:getSubmenuPresetsDir(view, menu_id), clean_name)
+    end
+    if path and lfs.attributes(path, "mode") == "file" then
+        local ok, data = pcall(dofile, path)
+        if ok and type(data) == "table" and data.menu_id == menu_id then
+            os.remove(path)
+            return true
+        end
+    end
+    return false, _("Submenu preset file not found.")
+end
+
 function MenuOrderManager:getHiddenBuiltinPath(view)
     return string.format("%s/.hidden_builtins.lua", self:getPresetsDir(view))
 end
@@ -778,13 +982,8 @@ function MenuOrderManager:listDeletablePresets(view)
 end
 
 function MenuOrderManager:savePreset(view, preset_name)
-    if not preset_name or preset_name:match("^%s*$") then
-        return false, _("Preset name cannot be empty.")
-    end
-    local clean_name = preset_name:gsub("[^%w_%- %.]", ""):gsub("^%s+", ""):gsub("%s+$", "")
-    if clean_name == "" then
-        return false, _("Invalid preset name.")
-    end
+    local clean_name, name_err = cleanPresetName(preset_name)
+    if not clean_name then return false, name_err end
 
     local order = self:loadOrder(view)
     local dir = self:getPresetsDir(view)

@@ -630,22 +630,26 @@ function UIScreens:showItemSortWidget(plugin, view, menu_id, on_close_callback)
         })
     end
 
+    local function buildOrderFromSortItems(source_items)
+        local new_list = {}
+        for _, sort_item in ipairs(source_items or {}) do
+            local iid = sort_item.item_id
+            if iid == "__empty_hint__" then
+                -- skip hint
+            elseif iid == MenuOrderManager.SEPARATOR_ID or not MenuOrderManager:isItemHidden(view, iid) then
+                table.insert(new_list, iid)
+            end
+        end
+        return new_list
+    end
+
     sort_widget = SortWidget:new{
         title = string.format("%s - %s", _("Reorder"), menu_title),
         item_table = sort_items,
         callback = function()
             local source_items = (sort_widget and sort_widget.item_table) or sort_items
-            local new_list = {}
-            for __, sort_item in ipairs(source_items) do
-                local iid = sort_item.item_id
-                if iid == "__empty_hint__" then
-                    -- skip hint
-                elseif iid == MenuOrderManager.SEPARATOR_ID or not MenuOrderManager:isItemHidden(view, iid) then
-                    table.insert(new_list, iid)
-                end
-            end
             local order = MenuOrderManager:loadOrder(view)
-            order[menu_id] = new_list
+            order[menu_id] = buildOrderFromSortItems(source_items)
             self:saveAndApply(plugin, view)
             -- Ensure check always goes up a level
             if sort_widget then
@@ -754,6 +758,20 @@ function UIScreens:showItemSortWidget(plugin, view, menu_id, on_close_callback)
                 }})
             end
         end
+        table.insert(buttons, {{
+            text = string.format(_("Presets for %s…"), menu_title),
+            align = "left",
+            callback = function()
+                UIManager:close(dialog)
+                local current_menu_items = buildOrderFromSortItems(this.item_table)
+                outer_self_item:showSubmenuPresetsMenu(plugin, view, menu_id, menu_title, function(preset_applied)
+                    if preset_applied then
+                        UIManager:close(this)
+                        outer_self_item:showItemSortWidget(plugin, view, menu_id, on_close_callback)
+                    end
+                end, current_menu_items)
+            end,
+        }})
         table.insert(buttons, {{
             text = string.format(_("Reset %s menu"), menu_title),
             align = "left",
@@ -1199,6 +1217,194 @@ end
 -- =========================================================================
 -- Preset Management UI
 -- =========================================================================
+
+local function submenuPresetPrefix(preset)
+    return preset.include_submenus and "[Nested] " or "[Direct] "
+end
+
+function UIScreens:showSaveSubmenuPresetDialog(plugin, view, menu_id, menu_title, include_submenus, on_close_callback, current_menu_items)
+    if plugin then self.plugin = plugin end
+    local input_dialog
+    input_dialog = InputDialog:new{
+        title = include_submenus
+            and string.format(_("Save %s and nested menus"), menu_title)
+            or string.format(_("Save %s menu order"), menu_title),
+        input_hint = _("e.g. My preferred order"),
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function()
+                        UIManager:close(input_dialog)
+                        if on_close_callback then on_close_callback() end
+                    end,
+                },
+                {
+                    text = _("Save"),
+                    is_enter_default = true,
+                    callback = function()
+                        local name = input_dialog:getInputText()
+                        UIManager:close(input_dialog)
+                        if name and name:match("%S") then
+                            local ok, result = MenuOrderManager:saveSubmenuPreset(
+                                view, menu_id, menu_title, name, include_submenus, current_menu_items
+                            )
+                            if ok then
+                                UIManager:show(Notification:new{
+                                    text = string.format(_("Saved preset “%s” for %s."), name, menu_title),
+                                })
+                            else
+                                UIManager:show(InfoMessage:new{
+                                    text = string.format(_("Error saving submenu preset:\n%s"), tostring(result)),
+                                })
+                            end
+                        end
+                        if on_close_callback then on_close_callback() end
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(input_dialog)
+    input_dialog:onShowKeyboard()
+end
+
+function UIScreens:showDeleteSubmenuPresetMenu(plugin, view, menu_id, menu_title, on_close_callback)
+    if plugin then self.plugin = plugin end
+    local presets = MenuOrderManager:listSubmenuPresets(view, menu_id)
+    if #presets == 0 then
+        UIManager:show(InfoMessage:new{ text = _("No submenu presets to delete.") })
+        if on_close_callback then on_close_callback() end
+        return
+    end
+
+    local items = {}
+    local dialog
+    for _, preset in ipairs(presets) do
+        local current_preset = preset
+        table.insert(items, {
+            text = submenuPresetPrefix(current_preset) .. current_preset.name,
+            help_text = current_preset.description,
+            callback = function()
+                UIManager:show(ConfirmBox:new{
+                    text = string.format(_("Delete preset “%s” for %s?"), current_preset.name, menu_title),
+                    ok_text = _("Delete"),
+                    ok_callback = function()
+                        local ok, err = MenuOrderManager:deleteSubmenuPreset(view, menu_id, current_preset)
+                        if ok then
+                            UIManager:show(Notification:new{
+                                text = string.format(_("Deleted preset “%s”."), current_preset.name),
+                            })
+                            dialog.on_close = nil
+                            UIManager:close(dialog)
+                            if on_close_callback then on_close_callback() end
+                        else
+                            UIManager:show(InfoMessage:new{ text = tostring(err or _("Failed to delete.")) })
+                        end
+                    end,
+                })
+            end,
+        })
+    end
+
+    dialog = Menu:new{
+        title = string.format(_("Delete presets for %s"), menu_title),
+        item_table = items,
+        on_close = on_close_callback,
+    }
+    UIManager:show(dialog)
+end
+
+function UIScreens:showSubmenuPresetsMenu(plugin, view, menu_id, menu_title, on_close_callback, current_menu_items)
+    if plugin then self.plugin = plugin end
+    local presets = MenuOrderManager:listSubmenuPresets(view, menu_id)
+    local preset_applied = false
+    local items = {}
+    local menu_dialog
+
+    local function closeForNavigation()
+        menu_dialog.on_close = nil
+        UIManager:close(menu_dialog)
+    end
+
+    table.insert(items, {
+        text = _("Save this menu order…"),
+        help_text = _("Capture only the direct item order of this menu. Visibility is unchanged."),
+        callback = function()
+            closeForNavigation()
+            self:showSaveSubmenuPresetDialog(plugin, view, menu_id, menu_title, false, function()
+                self:showSubmenuPresetsMenu(plugin, view, menu_id, menu_title, on_close_callback, current_menu_items)
+            end, current_menu_items)
+        end,
+    })
+    table.insert(items, {
+        text = _("Save with nested submenu orders…"),
+        help_text = _("Capture this menu order and the order of every submenu below it."),
+        callback = function()
+            closeForNavigation()
+            self:showSaveSubmenuPresetDialog(plugin, view, menu_id, menu_title, true, function()
+                self:showSubmenuPresetsMenu(plugin, view, menu_id, menu_title, on_close_callback, current_menu_items)
+            end, current_menu_items)
+        end,
+        separator = true,
+    })
+
+    for _, preset in ipairs(presets) do
+        local current_preset = preset
+        table.insert(items, {
+            text = submenuPresetPrefix(current_preset) .. current_preset.name,
+            help_text = current_preset.description,
+            callback = function()
+                UIManager:show(ConfirmBox:new{
+                    text = string.format(_("Apply preset “%s” to %s?"), current_preset.name, menu_title),
+                    ok_text = _("Apply"),
+                    ok_callback = function()
+                        local ok, err = MenuOrderManager:loadSubmenuPreset(view, menu_id, current_preset, current_menu_items)
+                        if ok then
+                            preset_applied = true
+                            self.needs_restart = true
+                            if plugin and plugin.ui then
+                                MenuOrderManager:applyLiveReload(plugin.ui, view)
+                            end
+                            UIManager:show(Notification:new{
+                                text = string.format(_("Loaded preset “%s” for %s."), current_preset.name, menu_title),
+                            })
+                            UIManager:close(menu_dialog)
+                        else
+                            UIManager:show(InfoMessage:new{
+                                text = string.format(_("Failed to load submenu preset:\n%s"), tostring(err)),
+                            })
+                        end
+                    end,
+                })
+            end,
+        })
+    end
+
+    if #presets > 0 then
+        table.insert(items, {
+            text = _("Delete preset…"),
+            help_text = string.format(_("Delete a saved preset for %s."), menu_title),
+            callback = function()
+                closeForNavigation()
+                self:showDeleteSubmenuPresetMenu(plugin, view, menu_id, menu_title, function()
+                    self:showSubmenuPresetsMenu(plugin, view, menu_id, menu_title, on_close_callback, current_menu_items)
+                end)
+            end,
+            separator = true,
+        })
+    end
+
+    menu_dialog = Menu:new{
+        title = string.format(_("Presets for %s"), menu_title),
+        item_table = items,
+        on_close = function()
+            if on_close_callback then on_close_callback(preset_applied) end
+        end,
+    }
+    UIManager:show(menu_dialog)
+end
 
 function UIScreens:showPresetsMenu(plugin, view, on_close_callback)
     if plugin then self.plugin = plugin end
