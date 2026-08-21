@@ -91,8 +91,47 @@ local function getTopSortWidget()
     return nil
 end
 
--- 2. Test Top Tabs Reordering with SortWidget Simulation
-print("\n--- Test 2: Top Tabs Reordering via SortWidget Simulation ---")
+-- 2. Test live-menu filtering and newly registered plugin discovery
+print("\n--- Test 2: Live Menu Discovery & Filtering ---")
+local ok, err = pcall(function()
+    local fake_plugin = {
+        ui = {
+            menu = {
+                tab_item_table = {
+                    {
+                        id = "fixture_menu",
+                        { id = "known_item", text = "Known item" },
+                        { id = "new_plugin_item", text = "New plugin item" },
+                    },
+                },
+            },
+        },
+    }
+    local live_ids, live_by_id, has_live = UIScreens:_getLiveMenuItems(fake_plugin, "fixture_menu")
+    assert_true(has_live, "Direct-table live menu is discovered")
+    assert_eq(#live_ids, 2, "All direct live menu children are collected")
+    assert_eq(live_ids[2], "new_plugin_item", "New plugin item is collected in live order")
+    assert_eq(live_by_id.new_plugin_item.text, "New plugin item", "Live plugin title remains available")
+
+    local merged, unavailable = UIScreens:_mergeConfiguredAndLiveItems(
+        { "stale_item", "known_item", MenuOrderManager.SEPARATOR_ID },
+        {}, live_ids, has_live
+    )
+    assert_eq(merged[1], "known_item", "Registered configured item keeps its position")
+    assert_eq(merged[2], MenuOrderManager.SEPARATOR_ID, "Configured separator is retained")
+    assert_eq(merged[3], "new_plugin_item", "New live plugin item is appended for reordering")
+    assert_eq(unavailable[1], "stale_item", "Unavailable legacy item is filtered from the editor")
+
+    local merged_hidden = UIScreens:_mergeConfiguredAndLiveItems(
+        { "known_item", "hidden_item" }, { "hidden_item" }, live_ids, has_live
+    )
+    assert_eq(#merged_hidden, 2, "Visible items and new plugins remain after hidden filtering")
+    assert_eq(merged_hidden[1], "known_item", "Hidden item is not presented as visible")
+end)
+assert_true(ok, "Live menu discovery and filtering completed cleanly: " .. tostring(err))
+
+-- 3. Test Top Tabs Reordering with SortWidget Simulation
+print("\n--- Test 3: Top Tabs Reordering via SortWidget Simulation ---")
 local ok, err = pcall(function()
     UIScreens:showTabReorderDialog(plugin, "reader")
     local sort_widget = getTopSortWidget()
@@ -149,8 +188,8 @@ local ok, err = pcall(function()
 end)
 assert_true(ok, "Top tabs reordering completed cleanly: " .. tostring(err))
 
--- 3. Test Item Customizer & Item SortWidget Simulation
-print("\n--- Test 3: Submenu Item SortWidget Simulation ---")
+-- 4. Test Item Customizer & Item SortWidget Simulation
+print("\n--- Test 4: Submenu Item SortWidget Simulation ---")
 local ok, err = pcall(function()
     UIScreens:showItemSortWidget(plugin, "reader", "tools")
     local sort_widget = getTopSortWidget()
@@ -229,8 +268,8 @@ local ok, err = pcall(function()
 end)
 assert_true(ok, "Submenu Item SortWidget completed cleanly: " .. tostring(err))
 
--- 4. Test Cross-Menu Movement Simulation
-print("\n--- Test 4: Cross-Menu Item Movement Simulation ---")
+-- 5. Test Cross-Menu Movement Simulation
+print("\n--- Test 5: Cross-Menu Item Movement Simulation ---")
 local ok, err = pcall(function()
     MenuOrderManager:moveItemToMenu("reader", "read_timer", "tools", "navi", 1)
     UIScreens:saveAndApply(plugin, "reader")
@@ -239,8 +278,8 @@ local ok, err = pcall(function()
 end)
 assert_true(ok, "Cross-menu movement applied cleanly: " .. tostring(err))
 
--- 5. Test Hidden Items Manager Simulation
-print("\n--- Test 5: Hidden Items Manager Simulation ---")
+-- 6. Test Hidden Items Manager Simulation
+print("\n--- Test 6: Hidden Items Manager Simulation ---")
 local ok, err = pcall(function()
     MenuOrderManager:setItemHidden("reader", "read_timer", true)
     UIScreens:saveAndApply(plugin, "reader")
@@ -253,8 +292,8 @@ local ok, err = pcall(function()
 end)
 assert_true(ok, "Hidden items manager opened and closed cleanly: " .. tostring(err))
 
--- 6. Test Search Results Simulation
-print("\n--- Test 6: Search Dialog & Results Simulation ---")
+-- 7. Test Search Results Simulation
+print("\n--- Test 7: Search Dialog & Results Simulation ---")
 local ok, err = pcall(function()
     UIScreens:showSearchResults(plugin, "reader", "timer")
     local entry = UIManager._window_stack[#UIManager._window_stack]
@@ -264,8 +303,8 @@ local ok, err = pcall(function()
 end)
 assert_true(ok, "Search results opened and closed cleanly: " .. tostring(err))
 
--- 7. Reset to clean defaults
-print("\n--- Test 7: Reset to Clean Defaults ---")
+-- 8. Reset to clean defaults
+print("\n--- Test 8: Reset to Clean Defaults ---")
 MenuOrderManager:resetOrder("reader")
 MenuOrderManager:resetOrder("filemanager")
 assert_eq(MenuOrderManager:isCustomized("reader"), false, "Reader order cleanly reset")

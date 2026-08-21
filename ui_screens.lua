@@ -111,6 +111,80 @@ function UIScreens:_getHiddenForMenu(view, menu_id)
     return hidden_for_menu
 end
 
+-- Return the direct children of a menu as KOReader currently renders them.
+-- Depending on where a menu lives, KOReader may represent its contents either
+-- in sub_item_table or directly in the menu table itself.
+function UIScreens:_getLiveMenuItems(plugin, menu_id)
+    local menu = plugin and plugin.ui and plugin.ui.menu
+    local tab_item_table = menu and menu.tab_item_table
+    if type(tab_item_table) ~= "table" then
+        return {}, {}, false
+    end
+
+    local live_menu
+    local ok_sorter, MenuSorter = pcall(require, "ui/menusorter")
+    if ok_sorter and MenuSorter and MenuSorter.findById then
+        live_menu = MenuSorter:findById(tab_item_table, menu_id)
+    end
+
+    if not live_menu then
+        return {}, {}, false
+    end
+
+    local children = type(live_menu.sub_item_table) == "table"
+        and live_menu.sub_item_table or live_menu
+    local ids = {}
+    local items_by_id = {}
+    for _, item in ipairs(children) do
+        if type(item) == "table" and item.id
+                and item.id ~= MenuOrderManager.SEPARATOR_ID then
+            table.insert(ids, item.id)
+            items_by_id[item.id] = item
+        end
+    end
+    return ids, items_by_id, true
+end
+
+-- Keep configured ordering for items that are actually registered, then add
+-- newly registered plugin items in their live KOReader order. Missing entries
+-- are returned separately so saving another change does not destroy data for a
+-- feature that may only be temporarily unavailable on this device/document.
+function UIScreens:_mergeConfiguredAndLiveItems(configured_items, hidden_items, live_ids, has_live_menu)
+    local hidden = {}
+    for _, id in ipairs(hidden_items or {}) do hidden[id] = true end
+
+    local live = {}
+    for _, id in ipairs(live_ids or {}) do live[id] = true end
+
+    local merged = {}
+    local seen = {}
+    local unavailable = {}
+    for _, id in ipairs(configured_items or {}) do
+        if id == MenuOrderManager.SEPARATOR_ID then
+            table.insert(merged, id)
+        elseif hidden[id] then
+            -- Hidden entries are appended by the caller with their hidden state.
+        elseif not has_live_menu or live[id] then
+            if not seen[id] then
+                table.insert(merged, id)
+                seen[id] = true
+            end
+        else
+            table.insert(unavailable, id)
+        end
+    end
+
+    if has_live_menu then
+        for _, id in ipairs(live_ids or {}) do
+            if not hidden[id] and not seen[id] then
+                table.insert(merged, id)
+                seen[id] = true
+            end
+        end
+    end
+    return merged, unavailable
+end
+
 function UIScreens:saveAndApply(plugin, view, silent)
     local active_plugin = plugin or self.plugin
     local ui = active_plugin and active_plugin.ui
@@ -426,7 +500,25 @@ end
 function UIScreens:showItemSortWidget(plugin, view, menu_id, on_close_callback)
     if plugin then self.plugin = plugin end
     local menu_title = MenuTitles:getTitle(menu_id)
-    local items = MenuOrderManager:getMenuItems(view, menu_id)
+    local configured_items = MenuOrderManager:getMenuItems(view, menu_id)
+
+    local hidden_for_menu = self:_getHiddenForMenu(view, menu_id)
+    local hidden_set = {}
+    for _, id in ipairs(hidden_for_menu) do hidden_set[id] = true end
+    -- Also retain malformed/older configurations that left a disabled item in
+    -- its menu list instead of removing it.
+    for _, id in ipairs(configured_items) do
+        if id ~= MenuOrderManager.SEPARATOR_ID
+                and MenuOrderManager:isItemHidden(view, id) and not hidden_set[id] then
+            table.insert(hidden_for_menu, id)
+            hidden_set[id] = true
+        end
+    end
+
+    local live_ids, live_items_by_id, has_live_menu = self:_getLiveMenuItems(plugin, menu_id)
+    local items, unavailable_items = self:_mergeConfiguredAndLiveItems(
+        configured_items, hidden_for_menu, live_ids, has_live_menu
+    )
 
     local sort_widget
 
@@ -493,7 +585,6 @@ function UIScreens:showItemSortWidget(plugin, view, menu_id, on_close_callback)
             end,
             hold_callback = function(self_item, refresh_func)
                 local dialog
-                local is_sub2 = MenuOrderManager:isSubmenu(view, this_id)
                 local buttons = {
                     {
                         {
@@ -517,7 +608,7 @@ function UIScreens:showItemSortWidget(plugin, view, menu_id, on_close_callback)
                         }
                     },
                 }
-                if is_sub2 then
+                if is_sub then
                     table.insert(buttons, {
                         {
                             text = _("Edit submenu contents →"),
@@ -531,7 +622,7 @@ function UIScreens:showItemSortWidget(plugin, view, menu_id, on_close_callback)
                     })
                 end
                 dialog = ButtonDialog:new{
-                    title = string.format(_("“%s”"), MenuTitles:getTitle(this_id)),
+                    title = string.format(_("“%s”"), MenuTitles:getTitle(this_id, live_items_by_id)),
                     title_align = "center",
                     buttons = buttons,
                 }
@@ -545,45 +636,12 @@ function UIScreens:showItemSortWidget(plugin, view, menu_id, on_close_callback)
         if is_sep then
             table.insert(sort_items, create_sep_item())
         else
-            local item_title = MenuTitles:getTitle(item_id)
+            local item_title = MenuTitles:getTitle(item_id, live_items_by_id)
+            local live_item = live_items_by_id[item_id]
             local is_submenu = MenuOrderManager:isSubmenu(view, item_id)
+                or live_item and type(live_item.sub_item_table) == "table"
             local display_text = string.format("%s%s", is_submenu and "[+] " or "", item_title)
             table.insert(sort_items, makeSortItem(item_id, is_submenu, display_text))
-        end
-    end
-
-    -- Cache hidden for reuse and orphan deduplication
-    local hidden_for_menu = self:_getHiddenForMenu(view, menu_id)
-    local hidden_set = {}
-    for __, hid in ipairs(hidden_for_menu) do hidden_set[hid] = true end
-
-    -- Also include live orphans (new plugins like Storefront) not yet in order file
-    do
-        local ok_sorter, MenuSorter = pcall(require, "ui/menusorter")
-        if ok_sorter and plugin and plugin.ui and plugin.ui.menu and plugin.ui.menu.tab_item_table then
-            local live_menu = MenuSorter:findById(plugin.ui.menu.tab_item_table, menu_id)
-            if not live_menu then
-                for _, tab in ipairs(plugin.ui.menu.tab_item_table) do
-                    if tab.id == menu_id and tab.sub_item_table then live_menu = tab; break end
-                end
-            end
-            if live_menu and live_menu.sub_item_table then
-                local seen_ids = {}
-                for _, si in ipairs(sort_items) do if si.item_id then seen_ids[si.item_id] = true end end
-                for hid,_ in pairs(hidden_set) do seen_ids[hid] = true end
-                for _, live_item in ipairs(live_menu.sub_item_table) do
-                    local lid = live_item.id
-                    if lid and lid ~= MenuOrderManager.SEPARATOR_ID and not seen_ids[lid] and not hidden_set[lid] then
-                        if not MenuOrderManager:isItemHidden(view, lid) then
-                            local live_title = MenuTitles:getTitle(lid)
-                            local is_sub_live = MenuOrderManager:isSubmenu(view, lid)
-                            local disp = string.format("%s%s", is_sub_live and "[+] " or "", live_title)
-                            table.insert(sort_items, makeSortItem(lid, is_sub_live, disp))
-                            seen_ids[lid] = true
-                        end
-                    end
-                end
-            end
         end
     end
 
@@ -595,8 +653,10 @@ function UIScreens:showItemSortWidget(plugin, view, menu_id, on_close_callback)
         end
         if not already and not seen_hidden[hid] then
             seen_hidden[hid] = true
-            local item_title = MenuTitles:getTitle(hid)
+            local item_title = MenuTitles:getTitle(hid, live_items_by_id)
+            local live_item = live_items_by_id[hid]
             local is_submenu = MenuOrderManager:isSubmenu(view, hid)
+                or live_item and type(live_item.sub_item_table) == "table"
             local display_text = string.format("%s%s (%s)", is_submenu and "[+] " or "", item_title, _("hidden"))
             local this_id = hid
             table.insert(sort_items, {
@@ -612,7 +672,7 @@ function UIScreens:showItemSortWidget(plugin, view, menu_id, on_close_callback)
                 end,
                 hold_callback = function(self_item, refresh_func)
                     UIManager:show(ConfirmBox:new{
-                        text = string.format(_("Restore “%s” to this menu?"), MenuTitles:getTitle(this_id)),
+                        text = string.format(_("Restore “%s” to this menu?"), MenuTitles:getTitle(this_id, live_items_by_id)),
                         ok_text = _("Restore"),
                         ok_callback = function()
                             MenuOrderManager:setItemHidden(view, this_id, false, menu_id)
@@ -647,13 +707,28 @@ function UIScreens:showItemSortWidget(plugin, view, menu_id, on_close_callback)
         return new_list
     end
 
+    local function buildPersistentOrder(source_items)
+        local new_list = buildOrderFromSortItems(source_items)
+        local present = {}
+        for _, id in ipairs(new_list) do
+            if id ~= MenuOrderManager.SEPARATOR_ID then present[id] = true end
+        end
+        for _, id in ipairs(unavailable_items) do
+            if not present[id] and not MenuOrderManager:isItemHidden(view, id) then
+                table.insert(new_list, id)
+                present[id] = true
+            end
+        end
+        return new_list
+    end
+
     sort_widget = SortWidget:new{
         title = string.format("%s - %s", _("Reorder"), menu_title),
         item_table = sort_items,
         callback = function()
             local source_items = (sort_widget and sort_widget.item_table) or sort_items
             local order = MenuOrderManager:loadOrder(view)
-            order[menu_id] = buildOrderFromSortItems(source_items)
+            order[menu_id] = buildPersistentOrder(source_items)
             self:saveAndApply(plugin, view)
             -- Ensure check always goes up a level
             if sort_widget then
@@ -747,9 +822,9 @@ function UIScreens:showItemSortWidget(plugin, view, menu_id, on_close_callback)
         local selected_submenu_title
         if this.marked > 0 then
             local sel = this.item_table[this.marked]
-            if sel and sel.item_id and MenuOrderManager:isSubmenu(view, sel.item_id) then
+            if sel and sel.item_id and sel.is_submenu then
                 selected_submenu_id = sel.item_id
-                selected_submenu_title = MenuTitles:getTitle(sel.item_id)
+                selected_submenu_title = MenuTitles:getTitle(sel.item_id, live_items_by_id)
                 table.insert(buttons, 5, {{
                     text = string.format(_("Edit submenu “%s” →"), selected_submenu_title),
                     align = "left",

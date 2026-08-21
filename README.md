@@ -16,6 +16,8 @@ Reorder, hide, move, and group KOReader menu items in both Book view and the Fil
 
 - Reorder the top menus in Book view and the File Manager independently.
 - Open and reorder nested submenus at any depth.
+- Show only items currently provided by KOReader or installed plugins.
+- Pick up newly installed plugin items before they exist in a saved order.
 - Show or hide items with the checkbox beside each entry.
 - Move an item to another menu or submenu.
 - Insert, reposition, and remove separators.
