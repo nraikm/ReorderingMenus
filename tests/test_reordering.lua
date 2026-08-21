@@ -36,6 +36,13 @@ local function assert_true(cond, msg)
     assert_eq(not not cond, true, msg)
 end
 
+local function list_contains(items, expected)
+    for _, item in ipairs(items or {}) do
+        if item == expected then return true end
+    end
+    return false
+end
+
 print("=======================================================")
 print("=== KOReader Reordering Menus Plugin - Test Suite   ===")
 print("=======================================================")
@@ -168,6 +175,67 @@ assert_eq(target_idx, 1, "Statistics inserted at index 1 in navi")
 MenuOrderManager:moveItemToMenu("reader", "statistics", "navi", "tools", 4)
 local restored_menu = MenuOrderManager:getParentMenu("reader", "statistics")
 assert_eq(restored_menu, "tools", "Statistics restored to tools")
+
+-- Move a complete submenu between top-level menus; its contents must remain intact.
+local original_more_tools = MenuOrderManager:getMenuItems("reader", "more_tools")
+local moved_submenu = MenuOrderManager:moveItemToMenu("reader", "more_tools", "tools", "setting", 2)
+assert_true(moved_submenu, "More tools submenu moved from Tools to Settings")
+assert_eq(MenuOrderManager:getParentMenu("reader", "more_tools"), "setting", "Moved submenu has the new parent")
+assert_eq(table.concat(MenuOrderManager:getMenuItems("reader", "more_tools"), "\0"),
+    table.concat(original_more_tools, "\0"), "Moving a submenu preserves its internal order")
+assert_eq(list_contains(MenuOrderManager:getMenuItems("reader", "tools"), "more_tools"), false,
+    "Moved submenu is removed from its old parent")
+
+local restored_submenu = MenuOrderManager:moveItemToMenu("reader", "more_tools", "setting", "tools")
+assert_true(restored_submenu, "More tools submenu moved back to Tools")
+
+-- Move a submenu into another, unrelated submenu and restore it.
+local original_help = MenuOrderManager:getMenuItems("reader", "help")
+assert_true(MenuOrderManager:moveItemToMenu("reader", "help", "main", "more_tools", 1),
+    "Help submenu moved into More tools")
+assert_eq(MenuOrderManager:getParentMenu("reader", "help"), "more_tools", "Nested destination becomes the parent")
+assert_eq(table.concat(MenuOrderManager:getMenuItems("reader", "help"), "\0"),
+    table.concat(original_help, "\0"), "Nested submenu contents remain intact")
+assert_true(MenuOrderManager:moveItemToMenu("reader", "help", "more_tools", "main"),
+    "Help submenu restored to Main menu")
+
+-- FileManager maintains an independent order and supports the same moves.
+local fm_more_tools = MenuOrderManager:getMenuItems("filemanager", "more_tools")
+assert_true(MenuOrderManager:moveItemToMenu("filemanager", "more_tools", "tools", "setting", 1),
+    "Normal-view More tools submenu moved to Settings")
+assert_eq(MenuOrderManager:getParentMenu("filemanager", "more_tools"), "setting",
+    "Normal-view submenu has the new parent")
+assert_eq(table.concat(MenuOrderManager:getMenuItems("filemanager", "more_tools"), "\0"),
+    table.concat(fm_more_tools, "\0"), "Normal-view submenu contents remain intact")
+assert_true(MenuOrderManager:moveItemToMenu("filemanager", "more_tools", "setting", "tools"),
+    "Normal-view More tools submenu restored")
+
+-- Reject moves that would corrupt the menu graph or duplicate an item.
+local self_move, self_err = MenuOrderManager:moveItemToMenu("reader", "more_tools", "tools", "more_tools")
+assert_eq(self_move, false, "A submenu cannot be moved into itself")
+assert_true(type(self_err) == "string", "Rejected self move explains the failure")
+assert_eq(list_contains(MenuOrderManager:getMenuItems("reader", "more_tools"), "more_tools"), false,
+    "Rejected self move does not create a cycle")
+assert_true(MenuOrderManager:isMenuDescendant("reader", "setting", "document"),
+    "Document is recognized as a descendant of Settings")
+local descendant_move = MenuOrderManager:moveItemToMenu(
+    "reader", "setting", "KOMenu:menu_buttons", "document"
+)
+assert_eq(descendant_move, false, "A menu cannot be moved into one of its descendants")
+local wrong_source_move = MenuOrderManager:moveItemToMenu("reader", "statistics", "navi", "search")
+assert_eq(wrong_source_move, false, "A stale or incorrect source menu is rejected")
+assert_eq(MenuOrderManager:getParentMenu("reader", "statistics"), "tools",
+    "Rejected wrong-source move leaves the item in place")
+
+local new_plugin_move = MenuOrderManager:moveItemToMenu(
+    "reader", "new_plugin_fixture", "tools", "setting", 1
+)
+assert_true(new_plugin_move, "A newly registered plugin item can acquire its first configured destination")
+assert_eq(MenuOrderManager:getParentMenu("reader", "new_plugin_fixture"), "setting",
+    "New plugin item is persisted under the selected menu")
+assert_true(MenuOrderManager:moveItemToMenu(
+    "reader", "new_plugin_fixture", "setting", "tools"
+), "Configured new plugin item can be moved again")
 
 -- -------------------------------------------------------------
 -- Suite 6: Hiding / Disabling Items

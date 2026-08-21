@@ -20,7 +20,7 @@ Reorder, hide, move, and group KOReader menu items in both Book view and the Fil
 - Show only items currently provided by KOReader or installed plugins.
 - Pick up newly installed plugin items before they exist in a saved order.
 - Show or hide items with the checkbox beside each entry.
-- Move an item to another menu or submenu.
+- Move an item or a complete KOReader submenu to another menu; destinations that would create a submenu cycle are excluded.
 - Insert, reposition, and remove separators.
 - Sort the current menu from A to Z or Z to A.
 - Reset the current Book or Normal menu, an individual submenu, or every menu.

@@ -402,18 +402,86 @@ function MenuOrderManager:moveItem(view, menu_id, from_idx, to_idx)
     return true
 end
 
-function MenuOrderManager:moveItemToMenu(view, item_id, from_menu_id, to_menu_id, target_idx)
+function MenuOrderManager:isMenuDescendant(view, ancestor_menu_id, candidate_menu_id)
     local order = self:loadOrder(view)
-    if not order[to_menu_id] then
-        order[to_menu_id] = {}
+    if not order[ancestor_menu_id] or ancestor_menu_id == candidate_menu_id then
+        return false
     end
 
-    -- Remove from from_menu
-    if from_menu_id and order[from_menu_id] then
-        for i = #order[from_menu_id], 1, -1 do
-            if order[from_menu_id][i] == item_id then
-                table.remove(order[from_menu_id], i)
+    local visited = {}
+    local function containsDescendant(menu_id)
+        if visited[menu_id] then return false end
+        visited[menu_id] = true
+        for _, child_id in ipairs(order[menu_id] or {}) do
+            if child_id == candidate_menu_id then return true end
+            if type(order[child_id]) == "table" and containsDescendant(child_id) then
+                return true
             end
+        end
+        return false
+    end
+    return containsDescendant(ancestor_menu_id)
+end
+
+function MenuOrderManager:canMoveItemToMenu(view, item_id, from_menu_id, to_menu_id)
+    local order = self:loadOrder(view)
+    if item_id == SEPARATOR_ID then
+        return false, _("Separators cannot be moved between menus.")
+    end
+    if not from_menu_id or type(order[from_menu_id]) ~= "table" then
+        return false, _("The source menu is unavailable.")
+    end
+    if not to_menu_id or type(order[to_menu_id]) ~= "table" then
+        return false, _("The destination menu is unavailable.")
+    end
+    if from_menu_id == to_menu_id then
+        return false, _("The item is already in this menu.")
+    end
+
+    local found_in_source = false
+    for _, id in ipairs(order[from_menu_id]) do
+        if id == item_id then
+            found_in_source = true
+            break
+        end
+    end
+    if not found_in_source then
+        -- Newly registered plugin items can be visible in KOReader before they
+        -- have an entry in the persisted order. Allow those orphans to acquire
+        -- their first configured parent, but reject a stale/wrong source when
+        -- the item is already configured elsewhere.
+        local configured_parent = self:getParentMenu(view, item_id)
+        if configured_parent then
+            return false, _("The item is no longer in the source menu.")
+        end
+    end
+
+    for _, id in ipairs(order[to_menu_id]) do
+        if id == item_id then
+            return false, _("The destination menu already contains this item.")
+        end
+    end
+
+    if type(order[item_id]) == "table" then
+        if to_menu_id == item_id then
+            return false, _("A submenu cannot be moved into itself.")
+        end
+        if self:isMenuDescendant(view, item_id, to_menu_id) then
+            return false, _("A submenu cannot be moved into one of its own submenus.")
+        end
+    end
+    return true
+end
+
+function MenuOrderManager:moveItemToMenu(view, item_id, from_menu_id, to_menu_id, target_idx)
+    local order = self:loadOrder(view)
+    local can_move, err = self:canMoveItemToMenu(view, item_id, from_menu_id, to_menu_id)
+    if not can_move then return false, err end
+
+    -- Remove from from_menu
+    for i = #order[from_menu_id], 1, -1 do
+        if order[from_menu_id][i] == item_id then
+            table.remove(order[from_menu_id], i)
         end
     end
 

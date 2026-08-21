@@ -1075,7 +1075,8 @@ function UIScreens:showDestinationMenuChooser(plugin, view, item_id, from_menu_i
 
     for __, entry in ipairs(all_menus) do
         local target_mid = entry.id
-        if target_mid ~= from_menu_id then
+        local can_move = MenuOrderManager:canMoveItemToMenu(view, item_id, from_menu_id, target_mid)
+        if can_move then
             local is_tab = entry.is_tab
             local title = MenuTitles:getTitle(target_mid)
             local prefix = is_tab and "[Tab] " or "[Menu] "
@@ -1083,12 +1084,18 @@ function UIScreens:showDestinationMenuChooser(plugin, view, item_id, from_menu_i
             table.insert(choices, {
                 text = string.format("%s%s", prefix, title),
                 callback = function()
-                    MenuOrderManager:moveItemToMenu(view, item_id, from_menu_id, target_mid)
+                    local moved, err = MenuOrderManager:moveItemToMenu(view, item_id, from_menu_id, target_mid)
+                    if not moved then
+                        UIManager:show(InfoMessage:new{
+                            text = err or _("This item cannot be moved to that menu."),
+                        })
+                        return
+                    end
                     self:saveAndApply(plugin, view)
                     UIManager:show(Notification:new{
                         text = string.format(_("Moved to %s."), title),
                     })
-                    on_moved_callback()
+                    if on_moved_callback then on_moved_callback() end
                 end,
             })
         end

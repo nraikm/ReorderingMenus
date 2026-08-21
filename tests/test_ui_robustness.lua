@@ -301,8 +301,38 @@ local ok, err = pcall(function()
 end)
 assert_true(ok, "Submenu Item SortWidget completed cleanly: " .. tostring(err))
 
--- 5. Test Cross-Menu Movement Simulation
-print("\n--- Test 5: Cross-Menu Item Movement Simulation ---")
+-- 5. Test destination chooser safety for complete submenus
+print("\n--- Test 5: Safe Submenu Destinations ---")
+local ok, err = pcall(function()
+    UIScreens:showDestinationMenuChooser(plugin, "reader", "more_tools", "tools")
+    local chooser
+    for i = #UIManager._window_stack, 1, -1 do
+        local entry = UIManager._window_stack[i]
+        local candidate = (entry and entry.widget) or entry
+        if candidate and candidate.item_table and candidate.title
+                and candidate.title:find("Move", 1, true) then
+            chooser = candidate
+            break
+        end
+    end
+    assert_true(chooser and chooser.item_table, "Destination chooser opened")
+    local settings_found = false
+    local self_found = false
+    local source_found = false
+    for _, choice in ipairs(chooser.item_table or {}) do
+        if choice.text == "[Tab] Settings" then settings_found = true end
+        if choice.text == "[Menu] More tools" then self_found = true end
+        if choice.text == "[Tab] Tools" then source_found = true end
+    end
+    assert_true(settings_found, "Valid destination remains available")
+    assert_eq(self_found, false, "Submenu itself is excluded as a destination")
+    assert_eq(source_found, false, "Current parent is excluded as a destination")
+    UIManager:close(chooser)
+end)
+assert_true(ok, "Safe submenu destination chooser completed cleanly: " .. tostring(err))
+
+-- 6. Test Cross-Menu Movement Simulation
+print("\n--- Test 6: Cross-Menu Item Movement Simulation ---")
 local ok, err = pcall(function()
     MenuOrderManager:moveItemToMenu("reader", "read_timer", "tools", "navi", 1)
     UIScreens:saveAndApply(plugin, "reader")
@@ -311,8 +341,8 @@ local ok, err = pcall(function()
 end)
 assert_true(ok, "Cross-menu movement applied cleanly: " .. tostring(err))
 
--- 6. Test Hidden Items Manager Simulation
-print("\n--- Test 6: Hidden Items Manager Simulation ---")
+-- 7. Test Hidden Items Manager Simulation
+print("\n--- Test 7: Hidden Items Manager Simulation ---")
 local ok, err = pcall(function()
     MenuOrderManager:setItemHidden("reader", "read_timer", true)
     UIScreens:saveAndApply(plugin, "reader")
@@ -325,8 +355,8 @@ local ok, err = pcall(function()
 end)
 assert_true(ok, "Hidden items manager opened and closed cleanly: " .. tostring(err))
 
--- 7. Test Search Results Simulation
-print("\n--- Test 7: Search Dialog & Results Simulation ---")
+-- 8. Test Search Results Simulation
+print("\n--- Test 8: Search Dialog & Results Simulation ---")
 local ok, err = pcall(function()
     UIScreens:showSearchResults(plugin, "reader", "timer")
     local entry = UIManager._window_stack[#UIManager._window_stack]
@@ -336,8 +366,8 @@ local ok, err = pcall(function()
 end)
 assert_true(ok, "Search results opened and closed cleanly: " .. tostring(err))
 
--- 8. Reset to clean defaults
-print("\n--- Test 8: Reset to Clean Defaults ---")
+-- 9. Reset to clean defaults
+print("\n--- Test 9: Reset to Clean Defaults ---")
 MenuOrderManager:resetOrder("reader")
 MenuOrderManager:resetOrder("filemanager")
 assert_eq(MenuOrderManager:isCustomized("reader"), false, "Reader order cleanly reset")

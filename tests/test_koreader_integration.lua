@@ -20,6 +20,7 @@ CanvasContext:init(Device)
 local ReaderMenu = require("apps/reader/modules/readermenu")
 local FileManagerMenu = require("apps/filemanager/filemanagermenu")
 local MenuOrderManager = require("menuorder_manager")
+local MenuSorter = require("ui/menusorter")
 local ReorderingMenus = require("main")
 
 local passed = 0
@@ -37,6 +38,15 @@ end
 
 local function assert_true(cond, msg)
     assert_eq(not not cond, true, msg)
+end
+
+local function has_direct_child(menu_tree, menu_id, child_id)
+    local menu = MenuSorter:findById(menu_tree, menu_id)
+    local children = menu and (menu.sub_item_table or menu)
+    for _, item in ipairs(children or {}) do
+        if item.id == child_id then return true end
+    end
+    return false
 end
 
 print("===============================================================")
@@ -187,6 +197,41 @@ for _, item in ipairs(navi_tab) do
     end
 end
 assert_eq(browsing_mode_found, false, "Hidden item (bookmark_browsing_mode) is omitted from menu")
+
+-- -------------------------------------------------------------
+-- Test 4: Moving Complete Submenus in Live Reader/FileManager Menus
+-- -------------------------------------------------------------
+print("\n--- Test 4: Live Cross-Menu Submenu Movement ---")
+
+assert_true(MenuOrderManager:moveItemToMenu("reader", "more_tools", "tools", "setting", 1),
+    "Reader More tools moved from Tools to Settings")
+assert_true(MenuOrderManager:saveOrder("reader"), "Saved moved Reader submenu")
+package.loaded["ui/elements/reader_menu_order"] = nil
+local moved_reader_menu = ReaderMenu:new{ ui = mock_ui_reader }
+mock_ui_reader.menu = moved_reader_menu
+moved_reader_menu:registerToMainMenu(plugin_reader)
+moved_reader_menu:setUpdateItemTable()
+assert_true(has_direct_child(moved_reader_menu.tab_item_table, "setting", "more_tools"),
+    "Reader live menu renders More tools under Settings")
+assert_eq(has_direct_child(moved_reader_menu.tab_item_table, "tools", "more_tools"), false,
+    "Reader live menu removes More tools from its old parent")
+assert_true(has_direct_child(moved_reader_menu.tab_item_table, "more_tools", "plugin_management"),
+    "Reader moved submenu retains its registered children")
+
+assert_true(MenuOrderManager:moveItemToMenu("filemanager", "more_tools", "tools", "setting", 1),
+    "Normal-view More tools moved from Tools to Settings")
+assert_true(MenuOrderManager:saveOrder("filemanager"), "Saved moved Normal-view submenu")
+package.loaded["ui/elements/filemanager_menu_order"] = nil
+local moved_fm_menu = FileManagerMenu:new{ ui = mock_ui_fm }
+mock_ui_fm.menu = moved_fm_menu
+moved_fm_menu:registerToMainMenu(plugin_fm)
+moved_fm_menu:setUpdateItemTable()
+assert_true(has_direct_child(moved_fm_menu.tab_item_table, "setting", "more_tools"),
+    "Normal live menu renders More tools under Settings")
+assert_eq(has_direct_child(moved_fm_menu.tab_item_table, "tools", "more_tools"), false,
+    "Normal live menu removes More tools from its old parent")
+assert_true(has_direct_child(moved_fm_menu.tab_item_table, "more_tools", "plugin_management"),
+    "Normal moved submenu retains its registered children")
 
 -- Cleanup / reset
 MenuOrderManager:resetOrder("reader")
