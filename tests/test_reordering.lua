@@ -266,6 +266,30 @@ assert_true(MenuOrderManager:moveItemToMenu("reader", "statistics", "search", "t
 assert_eq(MenuOrderManager:getRecentMoves("reader").statistics, "tools",
     "Recent move state records the interface's authoritative location")
 
+-- Reproduce the real Battery Statistics failure: an older reset/move sequence
+-- persisted the item under both More tools and Tools. Reload must keep the
+-- customized non-default destination and repair the file deterministically.
+local persisted_duplicate = MenuOrderManager:loadOrder("reader")
+table.insert(persisted_duplicate.tools, "battery_statistics")
+assert_eq(count_menu_references(persisted_duplicate, "battery_statistics"), 2,
+    "Battery Statistics duplicate-parent fixture was created")
+assert_true(MenuOrderManager:saveOrder("reader"), "Persisted Battery Statistics duplicate fixture")
+MenuOrderManager.orders.reader = nil
+local repaired_reload = MenuOrderManager:loadOrder("reader", true)
+assert_eq(count_menu_references(repaired_reload, "battery_statistics"), 1,
+    "Loading repairs persisted Battery Statistics duplicates")
+assert_eq(MenuOrderManager:getParentMenu("reader", "battery_statistics"), "tools",
+    "Duplicate repair preserves the customized Tools destination")
+
+-- Resetting More tools must restore stock children from every other parent,
+-- not create the same duplicate again.
+assert_true(MenuOrderManager:resetSubmenu("reader", "more_tools"),
+    "More tools reset succeeds after Battery Statistics move")
+assert_eq(count_menu_references(MenuOrderManager:loadOrder("reader"), "battery_statistics"), 1,
+    "Reset More tools leaves Battery Statistics under exactly one parent")
+assert_eq(MenuOrderManager:getParentMenu("reader", "battery_statistics"), "more_tools",
+    "Reset More tools restores Battery Statistics to its stock parent")
+
 -- -------------------------------------------------------------
 -- Suite 6: Hiding / Disabling Items
 -- -------------------------------------------------------------
@@ -284,6 +308,37 @@ assert_true(found_in_disabled, "calibre is in KOMenu:disabled")
 -- Unhide
 MenuOrderManager:setItemHidden("reader", "calibre", false, "tools")
 assert_eq(MenuOrderManager:isItemHidden("reader", "calibre"), false, "calibre is unhidden")
+
+local dynamic_search_item = "annas_archive_fixture"
+assert_true(MenuOrderManager:reconcileMenuItems("reader", "search", { dynamic_search_item }),
+    "Dynamically registered Search plugin is anchored in its live parent")
+MenuOrderManager:setItemHidden("reader", dynamic_search_item, true, "search")
+assert_true(MenuOrderManager:isItemHidden("reader", dynamic_search_item),
+    "Dynamic Search plugin is hidden")
+assert_eq(MenuOrderManager:getParentMenu("reader", dynamic_search_item), nil,
+    "Hidden dynamic plugin is removed from KOReader's active order")
+assert_eq(MenuOrderManager:getHiddenItemParent("reader", dynamic_search_item), "search",
+    "Hidden dynamic plugin retains its source across reloads")
+local persisted_hidden_state = dofile(DataStorage:getSettingsDir() .. "/reorderingmenus_state.lua")
+assert_eq(persisted_hidden_state.hidden_origins.reader[dynamic_search_item], "search",
+    "Dynamic plugin source is persisted outside the volatile menu tree")
+assert_true(list_contains(UIScreens:_getHiddenForMenu("reader", "search"), dynamic_search_item),
+    "Hidden dynamic plugin remains manageable in the Search editor")
+assert_true(MenuOrderManager:resetSubmenu("reader", "search"),
+    "Reset Search succeeds with a hidden dynamic plugin")
+assert_eq(MenuOrderManager:isItemHidden("reader", dynamic_search_item), false,
+    "Reset Search unhides the dynamic plugin")
+assert_eq(MenuOrderManager:getParentMenu("reader", dynamic_search_item), "search",
+    "Reset Search restores the dynamic plugin to Search")
+assert_eq(MenuOrderManager:getHiddenItemParent("reader", dynamic_search_item), nil,
+    "Reset Search clears the saved hidden origin")
+
+local late_search_item = "late_search_plugin_fixture"
+assert_true(MenuOrderManager:reconcileRegisteredItems("reader", {
+    [late_search_item] = { sorting_hint = "search" },
+}), "New plugin sorting hints are persisted before a top tab is hidden")
+assert_eq(MenuOrderManager:getParentMenu("reader", late_search_item), "search",
+    "Late Search plugin is anchored instead of remaining a dangerous orphan")
 
 -- -------------------------------------------------------------
 -- Suite 7: Separator Operations
@@ -304,6 +359,8 @@ print("\n--- Suite 8: Layout Synchronization ---")
 MenuOrderManager:setItemHidden("reader", "qrclipboard", true, "tools")
 MenuOrderManager:copyLayout("reader", "filemanager")
 assert_true(MenuOrderManager:isItemHidden("filemanager", "qrclipboard"), "Disabled items synced to filemanager")
+assert_eq(MenuOrderManager:getHiddenItemParent("filemanager", "qrclipboard"), "tools",
+    "Hidden-item source metadata is synced with copied layouts")
 
 -- -------------------------------------------------------------
 -- Suite 9: Persistence, Serialization & MenuSorter Compatibility

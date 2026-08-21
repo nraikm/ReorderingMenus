@@ -74,6 +74,32 @@ function UIScreens:getCurrentView(plugin)
     return self.current_view or "filemanager"
 end
 
+function UIScreens:_collectRegisteredMenuItems(plugin)
+    local active_plugin = plugin or self.plugin
+    local menu = active_plugin and active_plugin.ui and active_plugin.ui.menu
+    local menu_items = {}
+    for _, widget in pairs(menu and menu.registered_widgets or {}) do
+        if widget and type(widget.addToMainMenu) == "function" then
+            pcall(widget.addToMainMenu, widget, menu_items)
+        end
+    end
+    return menu_items
+end
+
+function UIScreens:reconcileRegisteredItems(plugin, view, persist)
+    if plugin then self.plugin = plugin end
+    local changed = MenuOrderManager:reconcileRegisteredItems(
+        view, self:_collectRegisteredMenuItems(plugin)
+    )
+    if changed and persist then MenuOrderManager:saveOrder(view) end
+    return changed
+end
+
+function UIScreens:reconcileLiveMenuItems(plugin, view, menu_id)
+    local live_ids = self:_getLiveMenuItems(plugin, menu_id)
+    return MenuOrderManager:reconcileMenuItems(view, menu_id, live_ids)
+end
+
 function UIScreens:promptRestart(msg)
     local message_text = msg or _("Menu order changes have been saved. Would you like to restart KOReader now for all changes to take full effect?")
     UIManager:show(ConfirmBox:new{
@@ -101,10 +127,14 @@ function UIScreens:_getHiddenForMenu(view, menu_id)
     local hidden_for_menu = {}
     local default_list = default_order[menu_id] or {}
     for _, item_id in ipairs(disabled) do
-        for _, default_id in ipairs(default_list) do
-            if default_id == item_id then
-                table.insert(hidden_for_menu, item_id)
-                break
+        if MenuOrderManager:getHiddenItemParent(view, item_id) == menu_id then
+            table.insert(hidden_for_menu, item_id)
+        else
+            for _, default_id in ipairs(default_list) do
+                if default_id == item_id then
+                    table.insert(hidden_for_menu, item_id)
+                    break
+                end
             end
         end
     end
@@ -229,6 +259,7 @@ end
 function UIScreens:saveAndApply(plugin, view, silent)
     local active_plugin = plugin or self.plugin
     local ui = active_plugin and active_plugin.ui
+    self:reconcileRegisteredItems(active_plugin, view, false)
     local ok, path = MenuOrderManager:saveOrder(view)
     if ok then
         self.needs_restart = true
@@ -260,6 +291,7 @@ function UIScreens:confirmResetSubmenu(plugin, view, menu_id, menu_title, on_suc
                 return
             end
 
+            self:reconcileRegisteredItems(plugin, view, false)
             local ok, err = MenuOrderManager:saveOrder(view)
             if not ok then
                 UIManager:show(InfoMessage:new{
@@ -302,6 +334,10 @@ function UIScreens:showTabReorderDialog(plugin, view, on_close_callback)
             end,
             callback = function()
                 local is_hidden = MenuOrderManager:isItemHidden(view, tid)
+                if not is_hidden then
+                    self:reconcileLiveMenuItems(plugin, view, tid)
+                    self:reconcileRegisteredItems(plugin, view, false)
+                end
                 MenuOrderManager:setTabHidden(view, tid, not is_hidden)
             end,
             hold_callback = function(self_item, refresh_func)
@@ -323,6 +359,8 @@ function UIScreens:showTabReorderDialog(plugin, view, on_close_callback)
                             text = _("Hide this tab"),
                             callback = function()
                                 UIManager:close(dialog)
+                                self:reconcileLiveMenuItems(plugin, view, tid)
+                                self:reconcileRegisteredItems(plugin, view, false)
                                 MenuOrderManager:setTabHidden(view, tid, true)
                                 if refresh_func then refresh_func() end
                             end,
@@ -1641,6 +1679,7 @@ function UIScreens:showPresetsMenu(plugin, view, on_close_callback)
                     ok_callback = function()
                         local ok, err = MenuOrderManager:loadPreset(view, cur_preset)
                         if ok then
+                            self:reconcileRegisteredItems(plugin, view, true)
                             preset_applied = true
                             self.needs_restart = true
                             if plugin and plugin.ui then
@@ -1705,6 +1744,7 @@ function UIScreens:showLoadPresetMenu(plugin, view, on_close_callback)
             callback = function()
                 local ok, err = MenuOrderManager:loadPreset(view, cur_preset)
                 if ok then
+                    self:reconcileRegisteredItems(plugin, view, true)
                     self.needs_restart = true
                     if plugin and plugin.ui then
                         MenuOrderManager:applyLiveReload(plugin.ui, view)

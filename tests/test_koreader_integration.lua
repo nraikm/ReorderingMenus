@@ -21,6 +21,7 @@ local ReaderMenu = require("apps/reader/modules/readermenu")
 local FileManagerMenu = require("apps/filemanager/filemanagermenu")
 local MenuOrderManager = require("menuorder_manager")
 local MenuSorter = require("ui/menusorter")
+local UIScreens = require("ui_screens")
 local ReorderingMenus = require("main")
 
 local passed = 0
@@ -232,6 +233,66 @@ assert_eq(has_direct_child(moved_fm_menu.tab_item_table, "tools", "more_tools"),
     "Normal live menu removes More tools from its old parent")
 assert_true(has_direct_child(moved_fm_menu.tab_item_table, "more_tools", "plugin_management"),
     "Normal moved submenu retains its registered children")
+
+-- -------------------------------------------------------------
+-- Test 5: Dynamic Search Plugins + Hidden Top Tab
+-- -------------------------------------------------------------
+print("\n--- Test 5: Hidden Dynamic Plugins and Top-Tab Stability ---")
+
+MenuOrderManager:resetOrder("filemanager")
+local anna_fixture = {
+    name = "annas_archive_fixture",
+    addToMainMenu = function(_, menu_items)
+        menu_items.annas_archive_fixture = {
+            text = "Anna's Archive fixture",
+            sorting_hint = "search",
+        }
+    end,
+}
+mock_ui_fm.menu:registerToMainMenu(anna_fixture)
+assert_true(UIScreens:reconcileRegisteredItems(plugin_fm, "filemanager", true),
+    "Dynamic Search plugin is anchored from its sorting hint")
+MenuOrderManager:setItemHidden("filemanager", "annas_archive_fixture", true, "search")
+assert_eq(MenuOrderManager:getHiddenItemParent("filemanager", "annas_archive_fixture"), "search",
+    "Hidden dynamic plugin retains Search as its source")
+assert_true(MenuOrderManager:resetSubmenu("filemanager", "search"),
+    "Reset Search restores the hidden dynamic plugin")
+assert_eq(MenuOrderManager:getParentMenu("filemanager", "annas_archive_fixture"), "search",
+    "Dynamic plugin is present in Search after reset")
+
+MenuOrderManager:setTabHidden("filemanager", "search", true)
+assert_true(MenuOrderManager:saveOrder("filemanager"), "Saved layout with Search hidden")
+
+-- Reproduce installing another Search plugin only after the Search tab has
+-- already been hidden. The lifecycle reconciliation must consume this item in
+-- Search's stored order before KOReader reaches orphan handling; otherwise its
+-- sorting_hint points at a tab that is not in the rendered tree and crashes.
+local late_search_fixture = {
+    name = "late_search_fixture",
+    addToMainMenu = function(_, menu_items)
+        menu_items.late_search_fixture = {
+            text = "Late Search fixture",
+            sorting_hint = "search",
+        }
+    end,
+}
+mock_ui_fm.menu:registerToMainMenu(late_search_fixture)
+plugin_fm:onShowFileManager()
+assert_eq(MenuOrderManager:getParentMenu("filemanager", "late_search_fixture"), "search",
+    "New plugin installed after Search was hidden is anchored safely")
+
+package.loaded["ui/elements/filemanager_menu_order"] = nil
+local hidden_search_menu = FileManagerMenu:new{ ui = mock_ui_fm }
+mock_ui_fm.menu = hidden_search_menu
+hidden_search_menu:registerToMainMenu(plugin_fm)
+hidden_search_menu:registerToMainMenu(anna_fixture)
+hidden_search_menu:registerToMainMenu(late_search_fixture)
+local hidden_search_ok, hidden_search_err = pcall(hidden_search_menu.setUpdateItemTable, hidden_search_menu)
+assert_true(hidden_search_ok, "Top menu still builds with Search hidden: " .. tostring(hidden_search_err))
+assert_true(type(hidden_search_menu.tab_item_table) == "table" and #hidden_search_menu.tab_item_table > 0,
+    "Other top menus remain available after hiding Search")
+assert_eq(MenuSorter:findById(hidden_search_menu.tab_item_table, "search"), nil,
+    "Search tab itself is hidden without breaking the menu")
 
 -- Cleanup / reset
 MenuOrderManager:resetOrder("reader")

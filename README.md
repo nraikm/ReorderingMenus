@@ -19,6 +19,7 @@ Reorder, hide, move, and group KOReader menu items in both Book view and the Fil
 - Keep plugin-owned internal menu arrangements under that plugin's control.
 - Show only items currently provided by KOReader or installed plugins.
 - Pick up newly installed plugin items before they exist in a saved order.
+- Keep hidden third-party items associated with their original menu so they can be shown again or restored by resetting that submenu.
 - Show or hide items with the checkbox beside each entry.
 - Move an item or a complete KOReader submenu to another menu; both editors refresh immediately, and destinations that would create a submenu cycle are excluded.
 - Insert, reposition, and remove separators.
@@ -66,9 +67,11 @@ Submenu presets affect ordering only. They do not replace visibility settings, a
 ## Notes
 
 - Changes are written to KOReader's standard `reader_menu_order.lua` and `filemanager_menu_order.lua` settings files.
+- The plugin records the original menu of hidden items in `reorderingmenus_state.lua`; it removes this small sidecar automatically when no such items remain hidden.
 - Presets are stored under `settings/menu_order_presets/` in the KOReader data directory.
 - A live reload is attempted after changes; KOReader may still request a restart when a complete refresh is needed.
 - Third-party plugins can add or remove menu entries. Missing entries in an older submenu preset are ignored, while newly available entries remain accessible.
+- Existing menu-order files containing the same item under multiple parents are repaired automatically, preferring a customized destination over the stock location.
 
 ## Development
 

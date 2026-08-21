@@ -528,8 +528,66 @@ local ok, err = pcall(function()
 end)
 assert_true(ok, "Cross-menu editor state stayed synchronized: " .. tostring(err))
 
--- 7. Test Hidden Items Manager Simulation
-print("\n--- Test 7: Hidden Items Manager Simulation ---")
+-- 7. Reproduce the real Battery Statistics move from More tools to Tools.
+print("\n--- Test 7: Battery Statistics More tools → Tools ---")
+local ok, err = pcall(function()
+    MenuOrderManager:resetOrder("reader")
+    -- Match KOReader's real batterystat plugin definition: the stock order,
+    -- rather than a sorting_hint, places this item under More tools.
+    mock_ui_reader.menu:registerToMainMenu({
+        name = "batterystat_fixture",
+        addToMainMenu = function(_, menu_items)
+            menu_items.battery_statistics = { text = "Battery statistics" }
+        end,
+    })
+    mock_ui_reader.menu.tab_item_table = nil
+    UIScreens:showItemSortWidget(plugin, "reader", "more_tools")
+    local more_tools_widget = getTopSortWidget()
+    local battery_index = findSortItem(more_tools_widget, "battery_statistics")
+    assert_true(battery_index ~= nil, "Battery Statistics is available in More tools")
+    more_tools_widget.marked = battery_index
+    more_tools_widget:onShowWidgetMenu()
+    local battery_actions = getTopButtonDialog()
+    local battery_move = findButton(battery_actions, "Move item to another menu…")
+    assert_true(battery_move ~= nil, "Battery Statistics exposes the move action")
+    battery_move.callback()
+    local battery_chooser = getMoveChooser()
+    assert_true(selectMoveDestination(battery_chooser, "tools"),
+        "Battery Statistics destination Tools selected")
+    assert_eq(findSortItem(more_tools_widget, "battery_statistics"), nil,
+        "Battery Statistics disappears from More tools immediately")
+    assert_eq(MenuOrderManager:getParentMenu("reader", "battery_statistics"), "tools",
+        "Battery Statistics has Tools as its only parent")
+
+    -- The next edit/save in More tools must not recreate the old reference.
+    more_tools_widget:onShowWidgetMenu()
+    local after_battery_move = getTopButtonDialog()
+    local add_separator = findButton(after_battery_move, "Add separator at bottom")
+    assert_true(add_separator ~= nil, "More tools remains editable after moving Battery Statistics")
+    add_separator.callback()
+    more_tools_widget:onReturn()
+    assert_eq(MenuOrderManager:getParentMenu("reader", "battery_statistics"), "tools",
+        "Updating More tools does not undo the Battery Statistics move")
+
+    UIScreens:showItemSortWidget(plugin, "reader", "tools")
+    local tools_widget = getTopSortWidget()
+    assert_true(findSortItem(tools_widget, "battery_statistics") ~= nil,
+        "Battery Statistics appears in the Tools editor")
+
+    local references = 0
+    for menu_id, items in pairs(MenuOrderManager:loadOrder("reader")) do
+        if menu_id ~= "KOMenu:disabled" and type(items) == "table" then
+            for _, item_id in ipairs(items) do
+                if item_id == "battery_statistics" then references = references + 1 end
+            end
+        end
+    end
+    assert_eq(references, 1, "Battery Statistics is persisted under exactly one menu")
+end)
+assert_true(ok, "Battery Statistics move workflow completed cleanly: " .. tostring(err))
+
+-- 8. Test Hidden Items Manager Simulation
+print("\n--- Test 8: Hidden Items Manager Simulation ---")
 local ok, err = pcall(function()
     MenuOrderManager:setItemHidden("reader", "read_timer", true)
     UIScreens:saveAndApply(plugin, "reader")
@@ -542,8 +600,8 @@ local ok, err = pcall(function()
 end)
 assert_true(ok, "Hidden items manager opened and closed cleanly: " .. tostring(err))
 
--- 8. Test Search Results Simulation
-print("\n--- Test 8: Search Dialog & Results Simulation ---")
+-- 9. Test Search Results Simulation
+print("\n--- Test 9: Search Dialog & Results Simulation ---")
 local ok, err = pcall(function()
     UIScreens:showSearchResults(plugin, "reader", "timer")
     local entry = UIManager._window_stack[#UIManager._window_stack]
@@ -553,8 +611,8 @@ local ok, err = pcall(function()
 end)
 assert_true(ok, "Search results opened and closed cleanly: " .. tostring(err))
 
--- 9. Reset to clean defaults
-print("\n--- Test 9: Reset to Clean Defaults ---")
+-- 10. Reset to clean defaults
+print("\n--- Test 10: Reset to Clean Defaults ---")
 MenuOrderManager:resetOrder("reader")
 MenuOrderManager:resetOrder("filemanager")
 assert_eq(MenuOrderManager:isCustomized("reader"), false, "Reader order cleanly reset")

@@ -40,6 +40,132 @@ local function getSettingsPath(view)
     return string.format("%s/%s_menu_order.lua", DataStorage:getSettingsDir(), view)
 end
 
+local function getPluginStatePath()
+    return string.format("%s/reorderingmenus_state.lua", DataStorage:getSettingsDir())
+end
+
+local plugin_state
+local function loadPluginState()
+    if plugin_state then return plugin_state end
+    local path = getPluginStatePath()
+    local loaded
+    if lfs.attributes(path, "mode") == "file" then
+        local ok, data = pcall(dofile, path)
+        if ok and type(data) == "table" then loaded = data end
+    end
+    plugin_state = loaded or {}
+    plugin_state.hidden_origins = plugin_state.hidden_origins or {}
+    plugin_state.hidden_origins.reader = plugin_state.hidden_origins.reader or {}
+    plugin_state.hidden_origins.filemanager = plugin_state.hidden_origins.filemanager or {}
+    return plugin_state
+end
+
+local function tableHasEntries(value)
+    return type(value) == "table" and next(value) ~= nil
+end
+
+local function savePluginState()
+    local state = loadPluginState()
+    local origins = state.hidden_origins
+    local has_data = tableHasEntries(origins.reader) or tableHasEntries(origins.filemanager)
+    local path = getPluginStatePath()
+    if not has_data then
+        if lfs.attributes(path) then os.remove(path) end
+        return true
+    end
+    return util.writeToFile(dump(state, nil, true), path, true, true)
+end
+
+local function findParentInOrder(order, item_id)
+    for menu_id, items in pairs(order or {}) do
+        if menu_id ~= "KOMenu:disabled" and type(items) == "table" then
+            for idx, id in ipairs(items) do
+                if id == item_id then return menu_id, idx end
+            end
+        end
+    end
+end
+
+local function findDefaultParent(default_order, item_id)
+    return findParentInOrder(default_order, item_id)
+end
+
+local function removeItemReferences(order, item_id)
+    for menu_id, items in pairs(order or {}) do
+        if menu_id ~= "KOMenu:disabled" and type(items) == "table" then
+            for i = #items, 1, -1 do
+                if items[i] == item_id then table.remove(items, i) end
+            end
+        end
+    end
+end
+
+local function normalizeDuplicateParents(view, order, default_order, recent_moves)
+    local parents_by_item = {}
+    for menu_id, items in pairs(order) do
+        if menu_id ~= "KOMenu:disabled" and type(items) == "table" then
+            for _, item_id in ipairs(items) do
+                if item_id ~= SEPARATOR_ID then
+                    local parents = parents_by_item[item_id]
+                    if not parents then
+                        parents = {}
+                        parents_by_item[item_id] = parents
+                    end
+                    parents[menu_id] = (parents[menu_id] or 0) + 1
+                end
+            end
+        end
+    end
+
+    local keep_parent = {}
+    for item_id, parents in pairs(parents_by_item) do
+        local parent_ids = {}
+        local occurrences = 0
+        for parent_id, count in pairs(parents) do
+            table.insert(parent_ids, parent_id)
+            occurrences = occurrences + count
+        end
+        if occurrences > 1 then
+            table.sort(parent_ids)
+            local default_parent = findDefaultParent(default_order, item_id)
+            local non_default = {}
+            for _, parent_id in ipairs(parent_ids) do
+                if parent_id ~= default_parent then table.insert(non_default, parent_id) end
+            end
+            local recent_parent = recent_moves and recent_moves[item_id]
+            if recent_parent and parents[recent_parent] then
+                keep_parent[item_id] = recent_parent
+            elseif #non_default == 1 then
+                -- A duplicate in the stock parent plus one custom parent is the
+                -- characteristic state left by the old move/reset bug. Preserve
+                -- the user's customized destination.
+                keep_parent[item_id] = non_default[1]
+            else
+                keep_parent[item_id] = parent_ids[1]
+            end
+            logger.warn("ReorderingMenus: repaired duplicate menu parents for", item_id,
+                "in", view, "keeping", keep_parent[item_id])
+        end
+    end
+
+    if not next(keep_parent) then return false end
+    local kept = {}
+    for menu_id, items in pairs(order) do
+        if menu_id ~= "KOMenu:disabled" and type(items) == "table" then
+            local cleaned = {}
+            for _, item_id in ipairs(items) do
+                local parent = keep_parent[item_id]
+                if not parent or (parent == menu_id and not kept[item_id]) then
+                    table.insert(cleaned, item_id)
+                    if parent then kept[item_id] = true end
+                end
+            end
+            order[menu_id] = cleaned
+        end
+    end
+    return true
+end
+
 function MenuOrderManager:getDefaultOrder(view)
     if self.default_orders[view] then
         return util.tableDeepCopy(self.default_orders[view])
@@ -91,7 +217,16 @@ function MenuOrderManager:loadOrder(view, force_reload)
         working_order["KOMenu:disabled"] = {}
     end
 
+    local repaired_duplicates = normalizeDuplicateParents(
+        view, working_order, self:getDefaultOrder(view), self.recent_moves[view]
+    )
     self.orders[view] = working_order
+    if repaired_duplicates and lfs.attributes(file_path, "mode") == "file" then
+        local ok, err = util.writeToFile(dump(working_order, nil, true), file_path, true, true)
+        if not ok then
+            logger.err("ReorderingMenus: failed to persist duplicate-parent repair:", err)
+        end
+    end
     return working_order
 end
 
@@ -136,6 +271,8 @@ function MenuOrderManager:resetOrder(view)
     self.orders[view] = nil
     self.backups[view] = nil
     self.recent_moves[view] = {}
+    loadPluginState().hidden_origins[view] = {}
+    savePluginState()
     -- Invalidate module cache
     package.loaded["ui/elements/reader_menu_order"] = nil
     package.loaded["ui/elements/filemanager_menu_order"] = nil
@@ -144,6 +281,10 @@ end
 
 function MenuOrderManager:getRecentMoves(view)
     return util.tableDeepCopy(self.recent_moves[view] or {})
+end
+
+function MenuOrderManager:getHiddenItemParent(view, item_id)
+    return loadPluginState().hidden_origins[view][item_id]
 end
 
 function MenuOrderManager:resetTabsOnly(view)
@@ -168,20 +309,74 @@ function MenuOrderManager:resetSubmenu(view, menu_id)
     local order = self:loadOrder(view)
     local default_order = self:getDefaultOrder(view)
     if not default_order[menu_id] then return false end
-    order[menu_id] = util.tableDeepCopy(default_order[menu_id])
-    -- Clear disabled for items that belong to this submenu's default
+
+    local current_items = util.tableDeepCopy(order[menu_id] or {})
+    local reset_items = util.tableDeepCopy(default_order[menu_id])
     local default_items_set = {}
-    for _, id in ipairs(default_order[menu_id] or {}) do
+    for _, id in ipairs(reset_items) do
         if id ~= SEPARATOR_ID then default_items_set[id] = true end
     end
+
+    local extras = {}
+    local extra_seen = {}
+    local function keepDynamicItem(item_id)
+        if item_id ~= SEPARATOR_ID and not default_items_set[item_id]
+                and not extra_seen[item_id] then
+            extra_seen[item_id] = true
+            table.insert(extras, item_id)
+        end
+    end
+    local function restoreToDefaultParent(item_id, parent_id)
+        removeItemReferences(order, item_id)
+        if parent_id and type(order[parent_id]) == "table" then
+            table.insert(order[parent_id], item_id)
+        end
+    end
+
+    -- Keep newly installed/dynamic items when resetting the stock order. Items
+    -- moved in from another stock menu return to their stock parent instead.
+    for _, item_id in ipairs(current_items) do
+        if item_id ~= SEPARATOR_ID and not default_items_set[item_id] then
+            local default_parent = findDefaultParent(default_order, item_id)
+            if default_parent and default_parent ~= menu_id then
+                restoreToDefaultParent(item_id, default_parent)
+            else
+                keepDynamicItem(item_id)
+            end
+        end
+    end
+
+    -- Hidden dynamic plugin items retain their source in our small sidecar
+    -- state. Resetting that menu unhides and restores them just like stock
+    -- items, fixing entries that previously disappeared permanently.
+    local origins = loadPluginState().hidden_origins[view]
     local new_disabled = {}
     for _, id in ipairs(order["KOMenu:disabled"] or {}) do
-        if not default_items_set[id] then
+        local belongs_here = default_items_set[id] or origins[id] == menu_id
+        if belongs_here then
+            local default_parent = findDefaultParent(default_order, id)
+            if not default_items_set[id] and default_parent and default_parent ~= menu_id then
+                restoreToDefaultParent(id, default_parent)
+            elseif not default_items_set[id] then
+                keepDynamicItem(id)
+            end
+            origins[id] = nil
+        else
             table.insert(new_disabled, id)
         end
     end
+
+    -- Default children may have been moved elsewhere by the user. Remove all
+    -- old references before restoring them here so a reset cannot create the
+    -- duplicate-parent state that made Battery Statistics placement random.
+    for item_id in pairs(default_items_set) do
+        removeItemReferences(order, item_id)
+    end
+    for _, item_id in ipairs(extras) do table.insert(reset_items, item_id) end
+    order[menu_id] = reset_items
     order["KOMenu:disabled"] = new_disabled
     self.recent_moves[view] = {}
+    savePluginState()
     return true
 end
 
@@ -298,16 +493,41 @@ end
 
 function MenuOrderManager:getParentMenu(view, item_id)
     local order = self:loadOrder(view)
-    for menu_id, items in pairs(order) do
-        if menu_id ~= "KOMenu:disabled" and type(items) == "table" then
-            for idx, it in ipairs(items) do
-                if it == item_id then
-                    return menu_id, idx
-                end
-            end
+    return findParentInOrder(order, item_id)
+end
+
+function MenuOrderManager:reconcileMenuItems(view, menu_id, item_ids)
+    local order = self:loadOrder(view)
+    if type(order[menu_id]) ~= "table" then return false end
+    local disabled = {}
+    for _, item_id in ipairs(order["KOMenu:disabled"] or {}) do disabled[item_id] = true end
+    local changed = false
+    for _, item_id in ipairs(item_ids or {}) do
+        if item_id ~= SEPARATOR_ID and not disabled[item_id]
+                and not findParentInOrder(order, item_id) then
+            table.insert(order[menu_id], item_id)
+            changed = true
         end
     end
-    return nil, nil
+    return changed
+end
+
+function MenuOrderManager:reconcileRegisteredItems(view, menu_items)
+    local order = self:loadOrder(view)
+    local by_menu = {}
+    for item_id, item in pairs(menu_items or {}) do
+        local sorting_hint = type(item) == "table" and item.sorting_hint
+        if type(sorting_hint) == "string" and type(order[sorting_hint]) == "table" then
+            by_menu[sorting_hint] = by_menu[sorting_hint] or {}
+            table.insert(by_menu[sorting_hint], item_id)
+        end
+    end
+    local changed = false
+    for menu_id, item_ids in pairs(by_menu) do
+        table.sort(item_ids)
+        if self:reconcileMenuItems(view, menu_id, item_ids) then changed = true end
+    end
+    return changed
 end
 
 function MenuOrderManager:isItemHidden(view, item_id)
@@ -329,8 +549,12 @@ end
 function MenuOrderManager:setItemHidden(view, item_id, is_hidden, current_menu_id)
     local order = self:loadOrder(view)
     order["KOMenu:disabled"] = order["KOMenu:disabled"] or {}
+    local origins = loadPluginState().hidden_origins[view]
 
     if is_hidden then
+        local source_menu = current_menu_id or findParentInOrder(order, item_id)
+        if source_menu then origins[item_id] = source_menu end
+
         -- Add to disabled list if not present
         local found = false
         for __, id in ipairs(order["KOMenu:disabled"]) do
@@ -343,25 +567,7 @@ function MenuOrderManager:setItemHidden(view, item_id, is_hidden, current_menu_i
             table.insert(order["KOMenu:disabled"], item_id)
         end
 
-        -- Remove from current menu
-        if current_menu_id and order[current_menu_id] then
-            for i = #order[current_menu_id], 1, -1 do
-                if order[current_menu_id][i] == item_id then
-                    table.remove(order[current_menu_id], i)
-                end
-            end
-        else
-            -- Search across all menus
-            for menu_id, items in pairs(order) do
-                if menu_id ~= "KOMenu:disabled" and type(items) == "table" then
-                    for i = #items, 1, -1 do
-                        if items[i] == item_id then
-                            table.remove(items, i)
-                        end
-                    end
-                end
-            end
-        end
+        removeItemReferences(order, item_id)
     else
         -- Unhide: remove from disabled list
         for i = #order["KOMenu:disabled"], 1, -1 do
@@ -370,38 +576,22 @@ function MenuOrderManager:setItemHidden(view, item_id, is_hidden, current_menu_i
             end
         end
 
-        -- Re-add to target menu if not present anywhere
-        local target_menu = current_menu_id
-        if not target_menu or not order[target_menu] then
-            -- Fallback to default location
-            local default_order = self:getDefaultOrder(view)
-            for menu_id, items in pairs(default_order) do
-                if menu_id ~= "KOMenu:disabled" and type(items) == "table" then
-                    for __, it in ipairs(items) do
-                        if it == item_id then
-                            target_menu = menu_id
-                            break
-                        end
-                    end
-                end
-                if target_menu then break end
+        -- Re-add only when the item is actually absent. moveItemToMenu calls
+        -- this after inserting its exact target index, which must not be
+        -- removed and appended again.
+        if not findParentInOrder(order, item_id) then
+            local target_menu = current_menu_id or origins[item_id]
+            if not target_menu or not order[target_menu] then
+                target_menu = findDefaultParent(self:getDefaultOrder(view), item_id)
             end
-        end
-
-        if target_menu and order[target_menu] then
-            -- Check if already present
-            local exists = false
-            for __, it in ipairs(order[target_menu]) do
-                if it == item_id then
-                    exists = true
-                    break
-                end
-            end
-            if not exists then
+            if target_menu and order[target_menu] then
                 table.insert(order[target_menu], item_id)
             end
         end
+        origins[item_id] = nil
     end
+    savePluginState()
+    return true
 end
 
 function MenuOrderManager:moveItem(view, menu_id, from_idx, to_idx)
@@ -596,6 +786,12 @@ function MenuOrderManager:copyLayout(from_view, to_view)
     if src_order["KOMenu:disabled"] then
         dst_order["KOMenu:disabled"] = util.tableDeepCopy(src_order["KOMenu:disabled"])
     end
+
+    -- Dynamic hidden items are absent from the menu-order tree, so their
+    -- source menu has to travel with the disabled list when copying a layout.
+    local origins = loadPluginState().hidden_origins
+    origins[to_view] = util.tableDeepCopy(origins[from_view])
+    savePluginState()
 
     self.orders[to_view] = dst_order
     return true
@@ -1137,6 +1333,13 @@ function MenuOrderManager:loadPreset(view, preset)
 
     self.orders[view] = order
     self.recent_moves[view] = {}
+    local disabled = {}
+    for _, item_id in ipairs(order["KOMenu:disabled"] or {}) do disabled[item_id] = true end
+    local origins = loadPluginState().hidden_origins[view]
+    for item_id in pairs(origins) do
+        if not disabled[item_id] then origins[item_id] = nil end
+    end
+    savePluginState()
     local ok, res = self:saveOrder(view)
     return ok, res
 end
