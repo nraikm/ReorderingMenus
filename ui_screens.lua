@@ -143,40 +143,11 @@ function UIScreens:getMainSubMenuItems(plugin)
     local disabled_count = #MenuOrderManager:getDisabledItems(view)
 
     local items = {
-        -- Single unified reordering interface (top tabs → double-click drills to submenu)
         {
             text = _("Reorder menus"),
-            help_text = _("Reorder top menus via SortWidget; tap to mark/move, double-tap (second tap on marked) or long-press → Edit submenu to drill into any submenu. Hidden items appear unchecked at bottom."),
+            help_text = _("Reorder top menus via SortWidget; tap to mark/move, double-tap marked or long-press → Edit submenu to drill. Hidden items appear unchecked. Use hamburger menu for presets/search."),
             callback = function()
                 self:showTabReorderDialog(plugin, self.current_view)
-            end,
-        },
-
-        -- Search for items (kept as global helper)
-        {
-            text = _("Search for menu item…"),
-            help_text = _("Find any menu item by name and jump to its menu or restore if hidden."),
-            callback = function()
-                self:showSearchDialog(plugin, self.current_view)
-            end,
-            separator = true,
-        },
-
-        -- Presets
-        {
-            text = _("Presets…"),
-            help_text = _("Apply built-in presets or save/manage your custom presets."),
-            callback = function()
-                self:showPresetsMenu(plugin, self.current_view)
-            end,
-        },
-
-        -- Advanced (consolidates previously scattered utilities)
-        {
-            text = _("Advanced…"),
-            help_text = _("Copy layout, manage hidden items, view config, reset."),
-            sub_item_table_func = function()
-                return self:_getAdvancedSubMenu(plugin, view, view_label)
             end,
         },
     }
@@ -475,6 +446,47 @@ function UIScreens:showTabReorderDialog(plugin, view, on_close_callback)
                 }})
             end
         end
+        -- Hierarchical reset: top level resets only main tabs, plus revert all
+        table.insert(buttons, {{
+            text = _("Reset top menus"),
+            align = "left",
+            callback = function()
+                UIManager:close(dialog)
+                UIManager:show(ConfirmBox:new{
+                    text = string.format(_("Reset top menus (%s) to default? Only tabs, not submenus."), view == "reader" and _("Book view") or _("Normal view")),
+                    ok_text = _("Reset"),
+                    ok_callback = function()
+                        MenuOrderManager:resetTabsOnly(view)
+                        MenuOrderManager:saveOrder(view)
+                        if plugin and plugin.ui then MenuOrderManager:applyLiveReload(plugin.ui, view) end
+                        this.item_table = {}
+                        -- Rebuild from fresh order
+                        local new_tabs = MenuOrderManager:getTabs(view)
+                        -- Rebuild sort_items via outer_self_tab's logic: just repopulate from current order
+                        -- Simplest: close and reopen
+                        UIManager:close(this)
+                        outer_self_tab:showTabReorderDialog(plugin, view)
+                    end,
+                })
+            end,
+        }})
+        table.insert(buttons, {{
+            text = _("Reset all menus (this view)"),
+            align = "left",
+            callback = function()
+                UIManager:close(dialog)
+                UIManager:show(ConfirmBox:new{
+                    text = _("Reset all menus for this view to default?"),
+                    ok_text = _("Reset all"),
+                    ok_callback = function()
+                        MenuOrderManager:resetOrder(view)
+                        if plugin and plugin.ui then MenuOrderManager:applyLiveReload(plugin.ui, view) end
+                        UIManager:close(this)
+                        outer_self_tab:showTabReorderDialog(plugin, view)
+                    end,
+                })
+            end,
+        }})
         dialog = ButtonDialog:new{
             shrink_unneeded_width = true,
             buttons = buttons,
@@ -881,6 +893,46 @@ function UIScreens:showItemSortWidget(plugin, view, menu_id, on_close_callback)
                 }})
             end
         end
+        -- Hierarchical reset: this submenu vs all
+        table.insert(buttons, {{
+            text = string.format(_("Reset “%s”"), MenuTitles:getTitle(menu_id)),
+            align = "left",
+            callback = function()
+                UIManager:close(dialog)
+                UIManager:show(ConfirmBox:new{
+                    text = string.format(_("Reset submenu “%s” to default?"), MenuTitles:getTitle(menu_id)),
+                    ok_text = _("Reset"),
+                    ok_callback = function()
+                        MenuOrderManager:resetSubmenu(view, menu_id)
+                        MenuOrderManager:saveOrder(view)
+                        if plugin and plugin.ui then MenuOrderManager:applyLiveReload(plugin.ui, view) end
+                        this.item_table = {}
+                        -- Rebuild from default for this submenu
+                        local new_items = MenuOrderManager:getMenuItems(view, menu_id)
+                        -- Close and reopen to refresh
+                        UIManager:close(this)
+                        outer_self_item:showItemSortWidget(plugin, view, menu_id)
+                    end,
+                })
+            end,
+        }})
+        table.insert(buttons, {{
+            text = _("Reset all menus (this view)"),
+            align = "left",
+            callback = function()
+                UIManager:close(dialog)
+                UIManager:show(ConfirmBox:new{
+                    text = _("Reset all menus for this view to default?"),
+                    ok_text = _("Reset all"),
+                    ok_callback = function()
+                        MenuOrderManager:resetOrder(view)
+                        if plugin and plugin.ui then MenuOrderManager:applyLiveReload(plugin.ui, view) end
+                        UIManager:close(this)
+                        outer_self_item:showTabReorderDialog(plugin, view)
+                    end,
+                })
+            end,
+        }})
         dialog = ButtonDialog:new{
             shrink_unneeded_width = true,
             buttons = buttons,

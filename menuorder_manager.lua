@@ -137,6 +137,43 @@ function MenuOrderManager:resetOrder(view)
     return true
 end
 
+function MenuOrderManager:resetTabsOnly(view)
+    local order = self:loadOrder(view)
+    local default_order = self:getDefaultOrder(view)
+    order["KOMenu:menu_buttons"] = util.tableDeepCopy(default_order["KOMenu:menu_buttons"])
+    -- Clear disabled for tabs that are now visible (only keep non-tab disabled)
+    local default_tabs_set = {}
+    for _, t in ipairs(default_order["KOMenu:menu_buttons"] or {}) do default_tabs_set[t] = true end
+    local new_disabled = {}
+    for _, id in ipairs(order["KOMenu:disabled"] or {}) do
+        if not default_tabs_set[id] then
+            table.insert(new_disabled, id)
+        end
+    end
+    order["KOMenu:disabled"] = new_disabled
+    return true
+end
+
+function MenuOrderManager:resetSubmenu(view, menu_id)
+    local order = self:loadOrder(view)
+    local default_order = self:getDefaultOrder(view)
+    if not default_order[menu_id] then return false end
+    order[menu_id] = util.tableDeepCopy(default_order[menu_id])
+    -- Clear disabled for items that belong to this submenu's default
+    local default_items_set = {}
+    for _, id in ipairs(default_order[menu_id] or {}) do
+        if id ~= SEPARATOR_ID then default_items_set[id] = true end
+    end
+    local new_disabled = {}
+    for _, id in ipairs(order["KOMenu:disabled"] or {}) do
+        if not default_items_set[id] then
+            table.insert(new_disabled, id)
+        end
+    end
+    order["KOMenu:disabled"] = new_disabled
+    return true
+end
+
 function MenuOrderManager:backupOrder(view)
     local order = self:loadOrder(view)
     self.backups[view] = util.tableDeepCopy(order)
