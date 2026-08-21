@@ -32,10 +32,6 @@ local function getSettingsPath(view)
     return string.format("%s/%s_menu_order.lua", DataStorage:getSettingsDir(), view)
 end
 
-local function getBackupPath(view)
-    return string.format("%s/%s_menu_order.lua.bak", DataStorage:getSettingsDir(), view)
-end
-
 function MenuOrderManager:getDefaultOrder(view)
     if self.default_orders[view] then
         return util.tableDeepCopy(self.default_orders[view])
@@ -455,7 +451,7 @@ end
 
 function MenuOrderManager:reorderTabs(view, new_tab_list)
     local order = self:loadOrder(view)
-    order["KOMenu:menu_buttons"] = new_tab_list
+    order["KOMenu:menu_buttons"] = util.tableDeepCopy(new_tab_list)
     return true
 end
 
@@ -647,20 +643,10 @@ function MenuOrderManager:unhideBuiltinPreset(view, preset_id)
     return true
 end
 
-function MenuOrderManager:getBuiltinPresets(view)
-    local default_order = self:getDefaultOrder(view)
+local function buildBuiltinPresets(view, default_order)
     local presets = {}
-    local hidden_ids = self:getHiddenBuiltinIds(view)
-    local is_hidden = {}
-    for __, hid in ipairs(hidden_ids) do is_hidden[hid] = true end
 
-    local function add_preset(preset)
-        if not is_hidden[preset.id] then
-            table.insert(presets, preset)
-        end
-    end
-
-    add_preset({
+    table.insert(presets, {
         id = "builtin_default",
         name = _("Default (Stock KOReader)"),
         description = _("Standard factory menu layout. Selecting this empties the config file to restore stock."),
@@ -672,7 +658,7 @@ function MenuOrderManager:getBuiltinPresets(view)
         local reading_focused = util.tableDeepCopy(default_order)
         reading_focused["KOMenu:menu_buttons"] = { "typeset", "navi", "setting", "tools" }
         reading_focused["KOMenu:disabled"] = { "filemanager", "main", "search" }
-        add_preset({
+        table.insert(presets, {
             id = "builtin_reading_focused",
             name = _("Reading Focused"),
             description = _("Puts Typeset and Navigation first; hides Search, Main, and Filemanager."),
@@ -683,7 +669,7 @@ function MenuOrderManager:getBuiltinPresets(view)
         local minimalist = util.tableDeepCopy(default_order)
         minimalist["KOMenu:menu_buttons"] = { "navi", "typeset" }
         minimalist["KOMenu:disabled"] = { "setting", "tools", "search", "filemanager", "main" }
-        add_preset({
+        table.insert(presets, {
             id = "builtin_minimalist",
             name = _("Minimalist Reader"),
             description = _("Keeps only Navigation and Typeset tabs for a distraction-free experience."),
@@ -694,7 +680,7 @@ function MenuOrderManager:getBuiltinPresets(view)
         local power_user = util.tableDeepCopy(default_order)
         power_user["KOMenu:menu_buttons"] = { "search", "navi", "typeset", "setting", "tools", "filemanager", "main" }
         power_user["KOMenu:disabled"] = {}
-        add_preset({
+        table.insert(presets, {
             id = "builtin_power_user",
             name = _("Full Power User"),
             description = _("All tabs and submenus exposed with Search in the first position."),
@@ -705,7 +691,7 @@ function MenuOrderManager:getBuiltinPresets(view)
         local clean_fm = util.tableDeepCopy(default_order)
         clean_fm["KOMenu:menu_buttons"] = { "filemanager_settings", "setting", "tools" }
         clean_fm["KOMenu:disabled"] = { "search", "filemanager", "main" }
-        add_preset({
+        table.insert(presets, {
             id = "builtin_clean_fm",
             name = _("Clean File Manager"),
             description = _("Essential browsing and device tools without clutter."),
@@ -716,7 +702,7 @@ function MenuOrderManager:getBuiltinPresets(view)
         local power_user = util.tableDeepCopy(default_order)
         power_user["KOMenu:menu_buttons"] = { "filemanager_settings", "search", "setting", "tools", "filemanager", "main" }
         power_user["KOMenu:disabled"] = {}
-        add_preset({
+        table.insert(presets, {
             id = "builtin_power_user",
             name = _("Full Power User"),
             description = _("All tabs and submenus visible."),
@@ -726,6 +712,21 @@ function MenuOrderManager:getBuiltinPresets(view)
     end
 
     return presets
+end
+
+function MenuOrderManager:getBuiltinPresets(view)
+    local hidden = {}
+    for _, id in ipairs(self:getHiddenBuiltinIds(view)) do
+        hidden[id] = true
+    end
+
+    local visible = {}
+    for _, preset in ipairs(buildBuiltinPresets(view, self:getDefaultOrder(view))) do
+        if not hidden[preset.id] then
+            table.insert(visible, preset)
+        end
+    end
+    return visible
 end
 
 function MenuOrderManager:listUserPresets(view)
@@ -767,16 +768,12 @@ function MenuOrderManager:getAllPresets(view)
 end
 
 function MenuOrderManager:listDeletablePresets(view)
-    local all = self:getAllPresets(view)
     local deletable = {}
-    for __, p in ipairs(all) do
+    for _, p in ipairs(self:getAllPresets(view)) do
         if p.id ~= "builtin_default" then
             table.insert(deletable, p)
         end
     end
-    -- Also include hidden builtins that are user presets? Already included
-    -- For deleted builtins that are hidden, they are not in getAllPresets, so not shown
-    -- But we want to show all deletable that are currently visible
     return deletable
 end
 
@@ -802,12 +799,11 @@ function MenuOrderManager:savePreset(view, preset_name)
 end
 
 function MenuOrderManager:loadPreset(view, preset)
-    local preset_id, preset_name
+    local preset_id
     local order
     if type(preset) == "table" and preset.order then
         order = util.tableDeepCopy(preset.order)
         preset_id = preset.id
-        preset_name = preset.name
     elseif type(preset) == "table" and preset.path then
         local ok, res = pcall(dofile, preset.path)
         if ok and type(res) == "table" then
@@ -826,36 +822,11 @@ function MenuOrderManager:loadPreset(view, preset)
             end
         end
         if not order then
-            -- Search builtins (including hidden check via getBuiltinPresets filtered, so search unfiltered)
-            -- Build unfiltered list for lookup
-            local default_order = self:getDefaultOrder(view)
-            local all_builtins = {}
-            -- Recreate unfiltered to find even hidden ones
-            local function add_builtin(p) table.insert(all_builtins, p) end
-            add_builtin({id="builtin_default", name=_("Default (Stock KOReader)"), order=default_order})
-            if view == "reader" then
-                local rf = util.tableDeepCopy(default_order); rf["KOMenu:menu_buttons"]={"typeset","navi","setting","tools"}; rf["KOMenu:disabled"]={"filemanager","main","search"}; add_builtin({id="builtin_reading_focused", name=_("Reading Focused"), order=rf})
-                local mn = util.tableDeepCopy(default_order); mn["KOMenu:menu_buttons"]={"navi","typeset"}; mn["KOMenu:disabled"]={"setting","tools","search","filemanager","main"}; add_builtin({id="builtin_minimalist", name=_("Minimalist Reader"), order=mn})
-                local pu = util.tableDeepCopy(default_order); pu["KOMenu:menu_buttons"]={"search","navi","typeset","setting","tools","filemanager","main"}; pu["KOMenu:disabled"]={}; add_builtin({id="builtin_power_user", name=_("Full Power User"), order=pu})
-            else
-                local cf = util.tableDeepCopy(default_order); cf["KOMenu:menu_buttons"]={"filemanager_settings","setting","tools"}; cf["KOMenu:disabled"]={"search","filemanager","main"}; add_builtin({id="builtin_clean_fm", name=_("Clean File Manager"), order=cf})
-                local pu = util.tableDeepCopy(default_order); pu["KOMenu:menu_buttons"]={"filemanager_settings","search","setting","tools","filemanager","main"}; pu["KOMenu:disabled"]={}; add_builtin({id="builtin_power_user", name=_("Full Power User"), order=pu})
-            end
-            for __, b in ipairs(all_builtins) do
+            for _, b in ipairs(buildBuiltinPresets(view, self:getDefaultOrder(view))) do
                 if b.name == preset or b.id == preset then
                     order = util.tableDeepCopy(b.order)
                     preset_id = b.id
                     break
-                end
-            end
-            -- Also check hidden builtins list for completeness
-            if not order then
-                for __, b in ipairs(self:getBuiltinPresets(view)) do
-                    if b.name == preset or b.id == preset then
-                        order = util.tableDeepCopy(b.order)
-                        preset_id = b.id
-                        break
-                    end
                 end
             end
         else
@@ -884,24 +855,7 @@ function MenuOrderManager:loadPreset(view, preset)
 end
 
 function MenuOrderManager:deletePreset(view, preset_name)
-    -- Try built-in first (allow deletion of built-ins except default)
-    -- preset_name may be id like builtin_reading_focused or display name
-    local builtins_all = {}
-    -- Build unfiltered builtin list for lookup (to find even hidden ones for error message)
-    do
-        local default_order = self:getDefaultOrder(view)
-        local function add_builtin(p) table.insert(builtins_all, p) end
-        add_builtin({id="builtin_default", name=_("Default (Stock KOReader)")})
-        if view == "reader" then
-            add_builtin({id="builtin_reading_focused", name=_("Reading Focused")})
-            add_builtin({id="builtin_minimalist", name=_("Minimalist Reader")})
-            add_builtin({id="builtin_power_user", name=_("Full Power User")})
-        else
-            add_builtin({id="builtin_clean_fm", name=_("Clean File Manager")})
-            add_builtin({id="builtin_power_user", name=_("Full Power User")})
-        end
-    end
-    for __, b in ipairs(builtins_all) do
+    for _, b in ipairs(buildBuiltinPresets(view, self:getDefaultOrder(view))) do
         if b.id == preset_name or b.name == preset_name then
             if b.id == "builtin_default" then
                 return false, _("Cannot delete the default preset.")
@@ -909,24 +863,13 @@ function MenuOrderManager:deletePreset(view, preset_name)
             return self:hideBuiltinPreset(view, b.id)
         end
     end
-    -- Also check via getBuiltinPresets filtered list (in case preset_name is display name)
-    for __, b in ipairs(self:getBuiltinPresets(view)) do
-        if b.id == preset_name or b.name == preset_name then
-            if b.id == "builtin_default" then
-                return false, _("Cannot delete the default preset.")
-            end
-            return self:hideBuiltinPreset(view, b.id)
-        end
-    end
-    -- Fallback: check hidden list to allow id-based deletion for already hidden?
-    -- Try user preset file
+
     local dir = self:getPresetsDir(view)
     local file_path = string.format("%s/%s.lua", dir, preset_name)
     if lfs.attributes(file_path) then
         os.remove(file_path)
         return true
     end
-    -- Try with user_ prefix or clean name
     local clean_name = preset_name:gsub("^user_", "")
     file_path = string.format("%s/%s.lua", dir, clean_name)
     if lfs.attributes(file_path) then

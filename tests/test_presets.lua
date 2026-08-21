@@ -3,12 +3,13 @@ Unit and Integration Tests for Preset Management in ReorderingMenus
 --]]
 
 dofile("/Applications/KOReader.app/Contents/koreader/setupkoenv.lua")
-package.path = "/Users/nr/Development/ReorderingMenus/?.lua;" .. package.path
+local test_path = debug.getinfo(1, "S").source:sub(2)
+local project_dir = assert(test_path:match("^(.*)/tests/[^/]+$"), "cannot locate plugin directory")
+package.path = project_dir .. "/?.lua;" .. package.path
 
 local LuaSettings = require("luasettings")
 local DataStorage = require("datastorage")
 local lfs = require("libs/libkoreader-lfs")
-local util = require("util")
 
 G_reader_settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/settings.reader.lua")
 G_defaults = require("luadefaults"):open()

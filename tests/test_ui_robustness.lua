@@ -3,13 +3,12 @@ Comprehensive UI Interaction and Live Reload Stress Test
 --]]
 
 dofile("/Applications/KOReader.app/Contents/koreader/setupkoenv.lua")
-package.path = "/Users/nr/Development/ReorderingMenus/?.lua;" .. package.path
+local test_path = debug.getinfo(1, "S").source:sub(2)
+local project_dir = assert(test_path:match("^(.*)/tests/[^/]+$"), "cannot locate plugin directory")
+package.path = project_dir .. "/?.lua;" .. package.path
 
 local LuaSettings = require("luasettings")
 local DataStorage = require("datastorage")
-local MenuSorter = require("ui/menusorter")
-local PluginLoader = require("pluginloader")
-local util = require("util")
 
 G_reader_settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/settings.reader.lua")
 G_defaults = require("luadefaults"):open()
@@ -19,7 +18,6 @@ local CanvasContext = require("document/canvascontext")
 CanvasContext:init(Device)
 
 local ReaderMenu = require("apps/reader/modules/readermenu")
-local FileManagerMenu = require("apps/filemanager/filemanagermenu")
 local MenuTitles = require("menu_titles")
 local MenuOrderManager = require("menuorder_manager")
 local UIScreens = require("ui_screens")
@@ -99,6 +97,50 @@ local ok, err = pcall(function()
     UIScreens:showTabReorderDialog(plugin, "reader")
     local sort_widget = getTopSortWidget()
     assert_true(sort_widget ~= nil, "SortWidget window on stack")
+
+    sort_widget.marked = 1
+    local selected_menu_title = MenuTitles:getTitle(sort_widget.item_table[1].tab_id)
+    sort_widget:onShowWidgetMenu()
+    local widget_menu
+    for i = #UIManager._window_stack, 1, -1 do
+        local candidate = UIManager._window_stack[i].widget or UIManager._window_stack[i]
+        if candidate.buttontable then
+            widget_menu = candidate
+            break
+        end
+    end
+    assert_true(widget_menu ~= nil, "Hamburger menu dialog opened")
+    local presets_callback
+    local named_reset_found = false
+    local selected_reset_found = false
+    for _, row in ipairs(widget_menu.buttontable.buttons) do
+        for _, button in ipairs(row) do
+            if button.text == "Presets…" then
+                presets_callback = button.callback
+            elseif button.text == "Reset Book menu" then
+                named_reset_found = true
+            elseif button.text == "Reset " .. selected_menu_title .. " menu" then
+                selected_reset_found = true
+            end
+        end
+    end
+    assert_true(presets_callback ~= nil, "Hamburger menu exposes preset management")
+    assert_true(named_reset_found, "Top-level reset names the current view")
+    assert_true(selected_reset_found, "Marked top-level submenu gets its own reset action")
+    presets_callback()
+
+    local presets_menu
+    for i = #UIManager._window_stack, 1, -1 do
+        local candidate = UIManager._window_stack[i].widget or UIManager._window_stack[i]
+        if candidate.title and candidate.title:find("Presets", 1, true) then
+            presets_menu = candidate
+            break
+        end
+    end
+    assert_true(presets_menu ~= nil, "Preset management opens from hamburger menu")
+    UIManager:close(presets_menu)
+    sort_widget.marked = 0
+
     -- Simulate dragging first item down
     local item = table.remove(sort_widget.item_table, 1)
     table.insert(sort_widget.item_table, 2, item)
@@ -114,6 +156,16 @@ local ok, err = pcall(function()
     local sort_widget = getTopSortWidget()
     assert_true(sort_widget ~= nil, "Tools SortWidget window on stack")
 
+    local selected_submenu_title
+    for i, item in ipairs(sort_widget.item_table) do
+        if item.is_submenu then
+            sort_widget.marked = i
+            selected_submenu_title = MenuTitles:getTitle(item.item_id)
+            break
+        end
+    end
+    assert_true(selected_submenu_title ~= nil, "Tools contains a selectable submenu")
+
     -- Test onShowWidgetMenu with separator insertion
     sort_widget:onShowWidgetMenu()
     local btn_widget
@@ -125,6 +177,29 @@ local ok, err = pcall(function()
         end
     end
     assert_true(btn_widget ~= nil, "SortWidget menu dialog opened")
+
+    local submenu_reset_found = false
+    local selected_submenu_reset_found = false
+    local sort_a_index
+    local sort_z_index
+    local button_index = 0
+    for _, row in ipairs(btn_widget.buttontable.buttons) do
+        for _, button in ipairs(row) do
+            button_index = button_index + 1
+            if button.text == "Reset Tools menu" then
+                submenu_reset_found = true
+            elseif selected_submenu_title and button.text == "Reset " .. selected_submenu_title .. " menu" then
+                selected_submenu_reset_found = true
+            elseif button.text == "Sort A to Z" then
+                sort_a_index = button_index
+            elseif button.text == "Sort Z to A" then
+                sort_z_index = button_index
+            end
+        end
+    end
+    assert_true(submenu_reset_found, "Submenu reset names the current menu")
+    assert_true(selected_submenu_reset_found, "Marked nested submenu gets its own reset action")
+    assert_eq(sort_z_index, sort_a_index + 1, "Sort actions remain next to each other")
 
     -- Simulate tapping "Add separator at bottom" (button 1)
     local initial_count = #sort_widget.item_table

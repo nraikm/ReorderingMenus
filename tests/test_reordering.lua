@@ -1,11 +1,11 @@
 dofile("/Applications/KOReader.app/Contents/koreader/setupkoenv.lua")
-package.path = "/Users/nr/Development/ReorderingMenus/?.lua;" .. package.path
+local test_path = debug.getinfo(1, "S").source:sub(2)
+local project_dir = assert(test_path:match("^(.*)/tests/[^/]+$"), "cannot locate plugin directory")
+package.path = project_dir .. "/?.lua;" .. package.path
 
 local LuaSettings = require("luasettings")
 local DataStorage = require("datastorage")
 local MenuSorter = require("ui/menusorter")
-local PluginLoader = require("pluginloader")
-local util = require("util")
 
 G_reader_settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/settings.reader.lua")
 G_defaults = require("luadefaults"):open()
@@ -44,7 +44,7 @@ print("=======================================================")
 -- Suite 1: Plugin Metadata & Initialization
 -- -------------------------------------------------------------
 print("\n--- Suite 1: Metadata & Plugin Setup ---")
-local meta = dofile("/Users/nr/Development/ReorderingMenus/_meta.lua")
+local meta = dofile(project_dir .. "/_meta.lua")
 assert_eq(meta.name, "reorderingmenus", "Meta plugin name")
 assert_true(meta.fullname ~= nil and #meta.fullname > 0, "Meta fullname exists")
 assert_true(meta.description ~= nil and #meta.description > 0, "Meta description exists")
@@ -67,30 +67,21 @@ local mock_menu_items = {}
 plugin_instance:addToMainMenu(mock_menu_items)
 assert_true(mock_menu_items.reordering_menus ~= nil, "addToMainMenu added reordering_menus")
 assert_eq(mock_menu_items.reordering_menus.sorting_hint, "more_tools", "Sorting hint is more_tools")
+assert_true(type(mock_menu_items.reordering_menus.callback) == "function", "Main menu uses direct reorder callback")
 
-local main_sub_items = mock_menu_items.reordering_menus.sub_item_table_func()
--- Condensed design: single Reorder menus entry, everything else in SortWidget hamburger
-assert_true(type(main_sub_items) == "table" and #main_sub_items == 1, "Main submenu has single unified entry")
--- Verify key entry exists
-local function hasText(tbl, needle)
-    for _, it in ipairs(tbl) do
-        if it.text and it.text:find(needle, 1, true) then return true end
-        if it.text_func and it.text_func():find(needle, 1, true) then return true end
-    end
-    return false
+-- Regression: the direct callback must pass the active view. Without it,
+-- MenuOrderManager tries to require ui/elements/nil_menu_order and KOReader exits.
+local original_show_tab_reorder = UIScreens.showTabReorderDialog
+local callback_plugin, callback_view
+UIScreens.showTabReorderDialog = function(_, plugin, view)
+    callback_plugin = plugin
+    callback_view = view
 end
-assert_true(hasText(main_sub_items, "Reorder menus"), "Main menu has unified Reorder menus entry")
-assert_true(not hasText(main_sub_items, "Search"), "Search condensed into hamburger, not main")
-assert_true(not hasText(main_sub_items, "Presets"), "Presets condensed into hamburger, not main")
-assert_true(not hasText(main_sub_items, "Advanced"), "Advanced condensed into hamburger, not main")
--- Verify hamburger contains presets/search via SortWidget
-local ok_hamburger, _ = pcall(function()
-    -- Open the unified reorder to check hamburger
-    local mock_ui = { document = { file = "dummy" }, menu = { registerToMainMenu = function() end } }
-    -- Just verify the function exists and doesn't error when called (it will create SortWidget)
-    -- We don't need to fully test hamburger here, just that main is condensed
-end)
-assert_true(ok_hamburger, "Hamburger check passed")
+local callback_ok = pcall(mock_menu_items.reordering_menus.callback)
+UIScreens.showTabReorderDialog = original_show_tab_reorder
+assert_true(callback_ok, "Direct reorder callback runs")
+assert_eq(callback_plugin, plugin_instance, "Direct reorder callback passes plugin")
+assert_eq(callback_view, "reader", "Direct reorder callback passes active view")
 
 -- -------------------------------------------------------------
 -- Suite 2: MenuTitles Translations & Icons

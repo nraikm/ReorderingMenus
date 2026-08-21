@@ -13,7 +13,6 @@ pcall(function()
 end)
 
 local UIScreens = require("ui_screens")
-local MenuOrderManager = require("menuorder_manager")
 
 local ReorderingMenus = WidgetContainer:extend{
     name = "reorderingmenus",
@@ -38,8 +37,8 @@ function ReorderingMenus:addToMainMenu(menu_items)
     menu_items.reordering_menus = {
         text = _("Reorder menus"),
         sorting_hint = "more_tools",
-        sub_item_table_func = function()
-            return UIScreens:getMainSubMenuItems(self)
+        callback = function()
+            UIScreens:showTabReorderDialog(self, UIScreens:getCurrentView(self))
         end,
     }
 end

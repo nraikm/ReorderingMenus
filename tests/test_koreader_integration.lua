@@ -3,13 +3,12 @@ End-to-End Integration Test for ReorderingMenus Plugin with KOReader Menu System
 --]]
 
 dofile("/Applications/KOReader.app/Contents/koreader/setupkoenv.lua")
-package.path = "/Users/nr/Development/ReorderingMenus/?.lua;" .. package.path
+local test_path = debug.getinfo(1, "S").source:sub(2)
+local project_dir = assert(test_path:match("^(.*)/tests/[^/]+$"), "cannot locate plugin directory")
+package.path = project_dir .. "/?.lua;" .. package.path
 
 local LuaSettings = require("luasettings")
 local DataStorage = require("datastorage")
-local MenuSorter = require("ui/menusorter")
-local PluginLoader = require("pluginloader")
-local util = require("util")
 
 G_reader_settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/settings.reader.lua")
 G_defaults = require("luadefaults"):open()
@@ -20,9 +19,7 @@ CanvasContext:init(Device)
 
 local ReaderMenu = require("apps/reader/modules/readermenu")
 local FileManagerMenu = require("apps/filemanager/filemanagermenu")
-local MenuTitles = require("menu_titles")
 local MenuOrderManager = require("menuorder_manager")
-local UIScreens = require("ui_screens")
 local ReorderingMenus = require("main")
 
 local passed = 0
@@ -160,7 +157,6 @@ assert_true(found_in_fm, "reordering_menus is accessible inside FileManager menu
 print("\n--- Test 3: Custom Order Application & Live Reload ---")
 
 -- Modify menu: Put bookmarks before table_of_contents in navi
-local navi_items = MenuOrderManager:getMenuItems("reader", "navi")
 MenuOrderManager:moveItem("reader", "navi", 1, 2)
 -- Hide bookmarks_browsing_mode
 MenuOrderManager:setItemHidden("reader", "bookmark_browsing_mode", true, "navi")
