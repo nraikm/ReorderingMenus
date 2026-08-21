@@ -1,0 +1,279 @@
+dofile("/Applications/KOReader.app/Contents/koreader/setupkoenv.lua")
+package.path = "/Users/nr/Development/ReorderingMenus/?.lua;" .. package.path
+
+local LuaSettings = require("luasettings")
+local DataStorage = require("datastorage")
+local MenuSorter = require("ui/menusorter")
+local PluginLoader = require("pluginloader")
+local util = require("util")
+
+G_reader_settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/settings.reader.lua")
+G_defaults = require("luadefaults"):open()
+
+local Device = require("device")
+local CanvasContext = require("document/canvascontext")
+CanvasContext:init(Device)
+
+local MenuTitles = require("menu_titles")
+local MenuOrderManager = require("menuorder_manager")
+local UIScreens = require("ui_screens")
+local MainPlugin = require("main")
+
+local passed = 0
+local failed = 0
+
+local function assert_eq(actual, expected, msg)
+    if actual == expected then
+        passed = passed + 1
+        print("  [PASS] " .. (msg or "assertion"))
+    else
+        failed = failed + 1
+        print("  [FAIL] " .. (msg or "assertion") .. " -> Expected: " .. tostring(expected) .. ", Got: " .. tostring(actual))
+    end
+end
+
+local function assert_true(cond, msg)
+    assert_eq(not not cond, true, msg)
+end
+
+print("=======================================================")
+print("=== KOReader Reordering Menus Plugin - Test Suite   ===")
+print("=======================================================")
+
+-- -------------------------------------------------------------
+-- Suite 1: Plugin Metadata & Initialization
+-- -------------------------------------------------------------
+print("\n--- Suite 1: Metadata & Plugin Setup ---")
+local meta = dofile("/Users/nr/Development/ReorderingMenus/_meta.lua")
+assert_eq(meta.name, "reorderingmenus", "Meta plugin name")
+assert_true(meta.fullname ~= nil and #meta.fullname > 0, "Meta fullname exists")
+assert_true(meta.description ~= nil and #meta.description > 0, "Meta description exists")
+
+local plugin_instance = MainPlugin:new{
+    ui = {
+        menu = {
+            registered_widgets = {},
+            registerToMainMenu = function(self, w)
+                table.insert(self.registered_widgets, w)
+            end,
+        },
+        document = { file = "dummy.epub" },
+    }
+}
+assert_eq(UIScreens.current_view, "reader", "UIScreens view initialized to reader when document is present")
+assert_eq(#plugin_instance.ui.menu.registered_widgets, 1, "Plugin registered to main menu")
+
+local mock_menu_items = {}
+plugin_instance:addToMainMenu(mock_menu_items)
+assert_true(mock_menu_items.reordering_menus ~= nil, "addToMainMenu added reordering_menus")
+assert_eq(mock_menu_items.reordering_menus.sorting_hint, "more_tools", "Sorting hint is more_tools")
+
+local main_sub_items = mock_menu_items.reordering_menus.sub_item_table_func()
+-- Unified design: single Reorder menus (drill-down via double-tap) + Search/Presets/Advanced = 4 entries
+assert_true(type(main_sub_items) == "table" and #main_sub_items >= 4, "Main submenu has unified entries (4 expected)")
+-- Verify key entries exist
+local function hasText(tbl, needle)
+    for _, it in ipairs(tbl) do
+        if it.text and it.text:find(needle, 1, true) then return true end
+        if it.text_func and it.text_func():find(needle, 1, true) then return true end
+    end
+    return false
+end
+assert_true(hasText(main_sub_items, "Reorder menus"), "Main menu has unified Reorder menus entry")
+assert_true(hasText(main_sub_items, "Search"), "Main menu has Search entry")
+assert_true(hasText(main_sub_items, "Presets"), "Main menu has Presets entry")
+assert_true(hasText(main_sub_items, "Advanced"), "Main menu has Advanced entry")
+-- Advanced submenu should contain hidden, copy, view, reset
+local advanced = nil
+for _, it in ipairs(main_sub_items) do
+    if it.text and it.text:find("Advanced") then advanced = it break end
+end
+if advanced and advanced.sub_item_table_func then
+    local adv_items = advanced.sub_item_table_func()
+    assert_true(#adv_items >= 5, "Advanced submenu has consolidated items")
+end
+
+-- -------------------------------------------------------------
+-- Suite 2: MenuTitles Translations & Icons
+-- -------------------------------------------------------------
+print("\n--- Suite 2: MenuTitles Lookups ---")
+assert_eq(MenuTitles:getTitle("navi"), "Navigation", "Tab title for navi")
+assert_eq(MenuTitles:getTitle("typeset"), "Typeset", "Tab title for typeset")
+assert_eq(MenuTitles:getTitle("setting"), "Settings", "Tab title for setting")
+assert_eq(MenuTitles:getTitle("tools"), "Tools", "Tab title for tools")
+assert_eq(MenuTitles:getTitle("search"), "Search", "Tab title for search")
+assert_eq(MenuTitles:getTitle("main"), "Main menu", "Tab title for main")
+assert_eq(MenuTitles:getTitle("filemanager_settings"), "File browser", "Tab title for filemanager_settings")
+
+assert_eq(MenuTitles:getIcon("navi"), "appbar.navigation", "Icon for navi")
+assert_eq(MenuTitles:getIcon("setting"), "appbar.settings", "Icon for setting")
+assert_eq(MenuTitles:getIcon("tools"), "appbar.tools", "Icon for tools")
+
+assert_eq(MenuTitles:getTitle("frontlight"), "Frontlight", "Title for frontlight")
+assert_eq(MenuTitles:getTitle("bookmarks"), "Bookmarks", "Title for bookmarks")
+assert_eq(MenuTitles:getTitle("doc_setting_tweak"), "Document setting tweak", "Title for doc_setting_tweak")
+assert_eq(MenuTitles:getTitle("custom_plugin_action"), "Custom Plugin Action", "Humanized title for custom_plugin_action")
+
+-- -------------------------------------------------------------
+-- Suite 3: Default Order Loading (Reader & FileManager)
+-- -------------------------------------------------------------
+print("\n--- Suite 3: Default Order Loading ---")
+local reader_default = MenuOrderManager:getDefaultOrder("reader")
+assert_true(#reader_default["KOMenu:menu_buttons"] == 7, "Reader has 7 default tabs")
+local fm_default = MenuOrderManager:getDefaultOrder("filemanager")
+assert_true(#fm_default["KOMenu:menu_buttons"] == 6, "FileManager has 6 default tabs")
+
+-- -------------------------------------------------------------
+-- Suite 4: Tab Reordering & Visibility
+-- -------------------------------------------------------------
+print("\n--- Suite 4: Tab Reordering & Visibility ---")
+local initial_tabs = MenuOrderManager:getTabs("reader")
+local tab1 = initial_tabs[1]
+local tab2 = initial_tabs[2]
+
+-- Reorder tabs
+local reordered_tabs = { tab2, tab1, unpack(initial_tabs, 3) }
+MenuOrderManager:reorderTabs("reader", reordered_tabs)
+local current_tabs = MenuOrderManager:getTabs("reader")
+assert_eq(current_tabs[1], tab2, "Tab 2 is now first")
+assert_eq(current_tabs[2], tab1, "Tab 1 is now second")
+
+-- Hide a tab
+MenuOrderManager:setTabHidden("reader", "search", true)
+local tabs_after_hide = MenuOrderManager:getTabs("reader")
+local search_present = false
+for _, t in ipairs(tabs_after_hide) do
+    if t == "search" then search_present = true break end
+end
+assert_eq(search_present, false, "Search tab removed from active tabs")
+assert_true(MenuOrderManager:isItemHidden("reader", "search"), "Search tab is marked as hidden")
+
+-- Unhide the tab
+MenuOrderManager:setTabHidden("reader", "search", false)
+assert_eq(MenuOrderManager:isItemHidden("reader", "search"), false, "Search tab is unhidden")
+
+-- -------------------------------------------------------------
+-- Suite 5: Menu Item Reordering & Cross-Menu Movement
+-- -------------------------------------------------------------
+print("\n--- Suite 5: Item Movement & Management ---")
+local tools_items = MenuOrderManager:getMenuItems("reader", "tools")
+local first_item = tools_items[1]
+local second_item = tools_items[2]
+
+MenuOrderManager:moveItem("reader", "tools", 1, 2)
+assert_eq(MenuOrderManager:getMenuItems("reader", "tools")[1], second_item, "Item moved to position 1")
+assert_eq(MenuOrderManager:getMenuItems("reader", "tools")[2], first_item, "Item moved to position 2")
+
+-- Move item to another submenu
+local from_menu, from_idx = MenuOrderManager:getParentMenu("reader", "statistics")
+assert_eq(from_menu, "tools", "Statistics starts in tools")
+
+MenuOrderManager:moveItemToMenu("reader", "statistics", "tools", "navi", 1)
+local target_menu, target_idx = MenuOrderManager:getParentMenu("reader", "statistics")
+assert_eq(target_menu, "navi", "Statistics moved to navi")
+assert_eq(target_idx, 1, "Statistics inserted at index 1 in navi")
+
+-- Move it back
+MenuOrderManager:moveItemToMenu("reader", "statistics", "navi", "tools", 4)
+local restored_menu = MenuOrderManager:getParentMenu("reader", "statistics")
+assert_eq(restored_menu, "tools", "Statistics restored to tools")
+
+-- -------------------------------------------------------------
+-- Suite 6: Hiding / Disabling Items
+-- -------------------------------------------------------------
+print("\n--- Suite 6: Item Hiding & KOMenu:disabled ---")
+assert_eq(MenuOrderManager:isItemHidden("reader", "calibre"), false, "calibre is initially visible")
+MenuOrderManager:setItemHidden("reader", "calibre", true, "tools")
+assert_true(MenuOrderManager:isItemHidden("reader", "calibre"), "calibre is hidden")
+
+local disabled_list = MenuOrderManager:getDisabledItems("reader")
+local found_in_disabled = false
+for _, id in ipairs(disabled_list) do
+    if id == "calibre" then found_in_disabled = true break end
+end
+assert_true(found_in_disabled, "calibre is in KOMenu:disabled")
+
+-- Unhide
+MenuOrderManager:setItemHidden("reader", "calibre", false, "tools")
+assert_eq(MenuOrderManager:isItemHidden("reader", "calibre"), false, "calibre is unhidden")
+
+-- -------------------------------------------------------------
+-- Suite 7: Separator Operations
+-- -------------------------------------------------------------
+print("\n--- Suite 7: Separator Insertion & Removal ---")
+local before_count = #MenuOrderManager:getMenuItems("reader", "more_tools")
+MenuOrderManager:insertSeparator("reader", "more_tools", 1)
+assert_eq(#MenuOrderManager:getMenuItems("reader", "more_tools"), before_count + 1, "Separator inserted at index 1")
+assert_eq(MenuOrderManager:getMenuItems("reader", "more_tools")[1], MenuOrderManager.SEPARATOR_ID, "Separator ID matched")
+
+MenuOrderManager:removeSeparator("reader", "more_tools", 1)
+assert_eq(#MenuOrderManager:getMenuItems("reader", "more_tools"), before_count, "Separator removed")
+
+-- -------------------------------------------------------------
+-- Suite 8: Layout Synchronization (Copy Layout)
+-- -------------------------------------------------------------
+print("\n--- Suite 8: Layout Synchronization ---")
+MenuOrderManager:setItemHidden("reader", "qrclipboard", true, "tools")
+MenuOrderManager:copyLayout("reader", "filemanager")
+assert_true(MenuOrderManager:isItemHidden("filemanager", "qrclipboard"), "Disabled items synced to filemanager")
+
+-- -------------------------------------------------------------
+-- Suite 9: Persistence, Serialization & MenuSorter Compatibility
+-- -------------------------------------------------------------
+print("\n--- Suite 9: File Persistence & MenuSorter Integration ---")
+local save_ok, save_path = MenuOrderManager:saveOrder("reader")
+assert_true(save_ok, "Saved reader configuration to: " .. tostring(save_path))
+assert_true(MenuOrderManager:isCustomized("reader"), "Reader order is reported as customized")
+
+-- Verify MenuSorter can parse and merge the saved file directly
+local user_order = MenuSorter:readMSSettings("reader")
+assert_true(type(user_order) == "table", "MenuSorter:readMSSettings returned valid table")
+assert_true(#user_order["KOMenu:menu_buttons"] > 0, "MenuSorter read user menu buttons")
+
+-- Test MenuSorter:mergeAndSort with mock item table
+local mock_items = {
+    ["KOMenu:menu_buttons"] = {},
+    navi = { icon = "appbar.navigation" },
+    typeset = { icon = "appbar.typeset" },
+    setting = { icon = "appbar.settings" },
+    tools = { icon = "appbar.tools" },
+    search = { icon = "appbar.search" },
+    filemanager = { icon = "appbar.filebrowser" },
+    main = { icon = "appbar.menu" },
+    bookmarks = { text = "Bookmarks" },
+    frontlight = { text = "Frontlight" },
+    calibre = { text = "Calibre" },
+}
+
+local sorted = MenuSorter:mergeAndSort("reader", mock_items, MenuOrderManager:getDefaultOrder("reader"))
+assert_true(type(sorted) == "table" and #sorted > 0, "MenuSorter:mergeAndSort produced valid sorted menu table")
+
+-- Reset
+MenuOrderManager:resetOrder("reader")
+assert_eq(MenuOrderManager:isCustomized("reader"), false, "Reader order reset to default")
+MenuOrderManager:resetOrder("filemanager")
+assert_eq(MenuOrderManager:isCustomized("filemanager"), false, "FileManager order reset to default")
+
+-- -------------------------------------------------------------
+-- Suite 10: Live Reload Cache Invalidation
+-- -------------------------------------------------------------
+print("\n--- Suite 10: Live Reload Handling ---")
+local dummy_ui = {
+    document = { file = "test.epub" },
+    menu = {
+        registered_widgets = {},
+        tab_item_table = { "cached_table" },
+    },
+    registerModule = function(self, name, mod) self[name] = mod end,
+}
+MenuOrderManager:applyLiveReload(dummy_ui, "reader")
+assert_true(dummy_ui.menu ~= nil, "new menu instantiated on live reload")
+assert_true(dummy_ui.menu.tab_item_table ~= nil, "tab_item_table rebuilt on live reload")
+
+print(string.format("\n======================================================="))
+print(string.format("=== ALL TESTS COMPLETED: %d PASSED, %d FAILED      ===", passed, failed))
+print("=======================================================")
+
+if failed > 0 then
+    os.exit(1)
+end

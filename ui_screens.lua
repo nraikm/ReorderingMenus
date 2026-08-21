@@ -1,0 +1,1537 @@
+--[[--
+UI screens and interactive dialogs for KOReader Reordering Menus plugin.
+Cleaned version: most functionality accessible via standard SortWidget.
+--]]
+
+local ButtonDialog = require("ui/widget/buttondialog")
+local ConfirmBox = require("ui/widget/confirmbox")
+local dump = require("dump")
+local Event = require("ui/event")
+local InfoMessage = require("ui/widget/infomessage")
+local InputDialog = require("ui/widget/inputdialog")
+local Menu = require("ui/widget/menu")
+local Notification = require("ui/widget/notification")
+local SortWidget = require("ui/widget/sortwidget")
+local TextViewer = require("ui/widget/textviewer")
+local UIManager = require("ui/uimanager")
+local util = require("util")
+local _ = require("gettext")
+
+local MenuOrderManager = require("menuorder_manager")
+local MenuTitles = require("menu_titles")
+
+-- Patch SortWidget's SortItemWidget to support double-tap (second tap on marked) to drill into submenu
+-- Native, no core file edit, no double_tap gesture lag (uses single-tap timing via marked)
+do
+    local ok = pcall(function()
+        local info = debug.getinfo(SortWidget._populateItems, "u")
+        for i = 1, info.nups do
+            local name, val = debug.getupvalue(SortWidget._populateItems, i)
+            if name == "SortItemWidget" and val and val.onTap then
+                local orig_onTap = val.onTap
+                val.onTap = function(self, _, ges)
+                    if self.item.checked_func and (self.show_parent.sort_disabled or ges.pos:intersectWith(self.checkmark_widget.dimen)) then
+                        if self.item.callback then self.item:callback() end
+                    elseif self.show_parent.sort_disabled then
+                        if self.item.callback then self.item:callback() else return true end
+                    elseif self.show_parent.marked == self.index then
+                        if self.item.is_submenu and self.item.onSubmenuTap then
+                            self.item.onSubmenuTap()
+                            self.show_parent:_populateItems()
+                            return true
+                        end
+                        self.show_parent.marked = 0
+                    else
+                        self.show_parent.marked = self.index
+                    end
+                    self.show_parent:_populateItems()
+                    return true
+                end
+                break
+            end
+        end
+    end)
+    if not ok then
+        -- Fallback: if patch fails, functionality degrades to long-press only (still native)
+    end
+end
+
+local UIScreens = {
+    current_view = "reader", -- "reader" or "filemanager"
+    needs_restart = false,
+}
+
+function UIScreens:initView(ui)
+    if ui and ui.document then
+        self.current_view = "reader"
+    else
+        self.current_view = "filemanager"
+    end
+end
+
+function UIScreens:getCurrentView(plugin)
+    local active_plugin = plugin or self.plugin
+    local ui = active_plugin and active_plugin.ui
+    if ui and ui.document then
+        return "reader"
+    end
+    return self.current_view or "filemanager"
+end
+
+-- =========================================================================
+-- Standard Restart Prompt Helper
+-- =========================================================================
+
+function UIScreens:promptRestart(msg)
+    local message_text = msg or _("Menu order changes have been saved. Would you like to restart KOReader now for all changes to take full effect?")
+    UIManager:show(ConfirmBox:new{
+        text = message_text,
+        ok_text = _("Restart now"),
+        ok_callback = function()
+            UIManager:broadcastEvent(Event:new("Restart"))
+        end,
+        cancel_text = _("Restart later"),
+    })
+end
+
+function UIScreens:checkPromptRestartOnExit()
+    if not self.needs_restart then return end
+    self.needs_restart = false
+    UIManager:nextTick(function()
+        self:promptRestart()
+    end)
+end
+
+-- =========================================================================
+-- Helper: get hidden items that belong to a specific menu (for unified view)
+-- =========================================================================
+
+function UIScreens:_getHiddenForMenu(view, menu_id)
+    local disabled = MenuOrderManager:getDisabledItems(view)
+    if #disabled == 0 then return {} end
+    local default_order = MenuOrderManager:getDefaultOrder(view)
+    local hidden_for_menu = {}
+    for __, item_id in ipairs(disabled) do
+        -- Check if this item's default parent is menu_id
+        local default_list = default_order[menu_id]
+        if default_list then
+            for __, def_id in ipairs(default_list) do
+                if def_id == item_id then
+                    table.insert(hidden_for_menu, item_id)
+                    break
+                end
+            end
+        end
+        -- Also handle separators not needed
+    end
+    return hidden_for_menu
+end
+
+-- =========================================================================
+-- Main Plugin Settings Menu (Item in Tools / More Tools) - CLEANED
+-- =========================================================================
+
+function UIScreens:getMainSubMenuItems(plugin)
+    if plugin then
+        self.plugin = plugin
+    end
+    local view = self:getCurrentView(plugin)
+    self.current_view = view
+    local view_label = view == "reader" and _("Book view") or _("Normal view")
+
+    -- Count hidden for subtitle
+    local disabled_count = #MenuOrderManager:getDisabledItems(view)
+
+    local items = {
+        -- Single unified reordering interface (top tabs → double-click drills to submenu)
+        {
+            text = _("Reorder menus"),
+            help_text = _("Reorder top menus via SortWidget; tap to mark/move, double-tap (second tap on marked) or long-press → Edit submenu to drill into any submenu. Hidden items appear unchecked at bottom."),
+            callback = function()
+                self:showTabReorderDialog(plugin, self.current_view)
+            end,
+        },
+
+        -- Search for items (kept as global helper)
+        {
+            text = _("Search for menu item…"),
+            help_text = _("Find any menu item by name and jump to its menu or restore if hidden."),
+            callback = function()
+                self:showSearchDialog(plugin, self.current_view)
+            end,
+            separator = true,
+        },
+
+        -- Presets
+        {
+            text = _("Presets…"),
+            help_text = _("Apply built-in presets or save/manage your custom presets."),
+            callback = function()
+                self:showPresetsMenu(plugin, self.current_view)
+            end,
+        },
+
+        -- Advanced (consolidates previously scattered utilities)
+        {
+            text = _("Advanced…"),
+            help_text = _("Copy layout, manage hidden items, view config, reset."),
+            sub_item_table_func = function()
+                return self:_getAdvancedSubMenu(plugin, view, view_label)
+            end,
+        },
+    }
+
+    return items
+end
+
+function UIScreens:_getAdvancedSubMenu(plugin, view, view_label)
+    local disabled = MenuOrderManager:getDisabledItems(view)
+    local hidden_label = string.format(_("Hidden items (%d)"), #disabled)
+    if #disabled == 0 then
+        hidden_label = _("Hidden items")
+    end
+    local from_view = self.current_view
+    local to_view = (from_view == "reader") and "filemanager" or "reader"
+    local src_label = from_view == "reader" and _("Book view") or _("Normal view")
+    local dst_label = to_view == "reader" and _("Book view") or _("Normal view")
+
+    return {
+        {
+            text = hidden_label,
+            help_text = _("View and restore hidden / disabled items."),
+            callback = function()
+                self:showHiddenItemsManager(plugin, self.current_view)
+            end,
+        },
+        {
+            text = (self.current_view == "reader")
+                and _("Copy layout to Normal view")
+                or _("Copy layout to Book view"),
+            help_text = _("Copy common menu structures to the other view."),
+            callback = function()
+                UIManager:show(ConfirmBox:new{
+                    text = string.format(_("Copy menu layout from %s to %s?"), src_label, dst_label),
+                    ok_text = _("Copy"),
+                    ok_callback = function()
+                        MenuOrderManager:copyLayout(from_view, to_view)
+                        local ok, _ = MenuOrderManager:saveOrder(to_view)
+                        if ok then
+                            if plugin and plugin.ui then
+                                MenuOrderManager:applyLiveReload(plugin.ui, to_view)
+                            end
+                            self.needs_restart = false
+                            self:promptRestart(string.format(_("Copied menu layout from %s to %s. Would you like to restart KOReader now?"), src_label, dst_label))
+                        end
+                    end,
+                })
+            end,
+            separator = true,
+        },
+        {
+            text = _("View configuration file"),
+            help_text = _("Inspect raw Lua configuration for current view (debug)."),
+            callback = function()
+                self:showRawConfigViewer(plugin, self.current_view)
+            end,
+        },
+        {
+            text = _("Reset current view to default"),
+            help_text = string.format(_("Reset %s menus to KOReader defaults."), view_label),
+            callback = function()
+                UIManager:show(ConfirmBox:new{
+                    text = string.format(_("Reset %s menus to KOReader defaults?"), view_label),
+                    ok_text = _("Reset"),
+                    ok_callback = function()
+                        MenuOrderManager:resetOrder(self.current_view)
+                        if plugin and plugin.ui then
+                            MenuOrderManager:applyLiveReload(plugin.ui, self.current_view)
+                        end
+                        self.needs_restart = false
+                        self:promptRestart(string.format(_("%s menus reset to default. Would you like to restart KOReader now?"), view_label))
+                    end,
+                })
+            end,
+        },
+        {
+            text = _("Reset both views to default"),
+            callback = function()
+                UIManager:show(ConfirmBox:new{
+                    text = _("Reset all menus (both Book view and Normal view) to KOReader defaults?"),
+                    ok_text = _("Reset all"),
+                    ok_callback = function()
+                        MenuOrderManager:resetOrder("reader")
+                        MenuOrderManager:resetOrder("filemanager")
+                        if plugin and plugin.ui then
+                            MenuOrderManager:applyLiveReload(plugin.ui, "reader")
+                            MenuOrderManager:applyLiveReload(plugin.ui, "filemanager")
+                        end
+                        self.needs_restart = false
+                        self:promptRestart(_("All menus reset to defaults. Would you like to restart KOReader now?"))
+                    end,
+                })
+            end,
+        },
+    }
+end
+
+-- =========================================================================
+-- Save & Apply Helper
+-- =========================================================================
+
+function UIScreens:saveAndApply(plugin, view, silent)
+    local active_plugin = plugin or self.plugin
+    local ui = active_plugin and active_plugin.ui
+    local ok, path = MenuOrderManager:saveOrder(view)
+    if ok then
+        self.needs_restart = true
+        if ui then
+            MenuOrderManager:applyLiveReload(ui, view)
+        end
+        local view_name = view == "reader" and _("Book view") or _("Normal view")
+        if not silent then
+            UIManager:show(Notification:new{
+                text = string.format(_("%s menu order saved."), view_name),
+            })
+        end
+    else
+        UIManager:show(InfoMessage:new{
+            text = string.format(_("Error saving configuration:\n%s"), tostring(path)),
+        })
+    end
+end
+
+-- =========================================================================
+-- Top Tabs Reorder & Visibility Screen (SortWidget) - unified
+-- =========================================================================
+
+function UIScreens:showTabReorderDialog(plugin, view, on_close_callback)
+    if plugin then self.plugin = plugin end
+    local all_tabs = MenuOrderManager:getAllKnownTabs(view)
+    local current_tabs = MenuOrderManager:getTabs(view)
+
+    local active_order = {}
+    local seen = {}
+    for __, tab_id in ipairs(current_tabs) do
+        seen[tab_id] = true
+        table.insert(active_order, tab_id)
+    end
+    for __, tab_id in ipairs(all_tabs) do
+        if not seen[tab_id] then
+            table.insert(active_order, tab_id)
+        end
+    end
+
+    local sort_items = {}
+    local function makeTabItem(tid)
+        local tab_title = MenuTitles:getTitle(tid)
+        local icon = MenuTitles:getIcon(tid)
+        local display_text = icon and string.format("[%s] %s", tab_title, tid) or tab_title
+        return {
+            text = display_text,
+            tab_id = tid,
+            item_id = tid,
+            is_submenu = true,
+            onSubmenuTap = function()
+                self:showItemSortWidget(plugin, view, tid, function()
+                    if sort_widget then sort_widget:_populateItems() end
+                end)
+            end,
+            checked_func = function()
+                return not MenuOrderManager:isItemHidden(view, tid)
+            end,
+            callback = function()
+                local is_hidden = MenuOrderManager:isItemHidden(view, tid)
+                MenuOrderManager:setTabHidden(view, tid, not is_hidden)
+            end,
+            hold_callback = function(self_item, refresh_func)
+                local dialog
+                dialog = ButtonDialog:new{
+                    title = string.format(_("“%s”"), MenuTitles:getTitle(tid)),
+                    title_align = "center",
+                    buttons = {
+                        {{
+                            text = _("Edit submenu contents →"),
+                            callback = function()
+                                UIManager:close(dialog)
+                                self:showItemSortWidget(plugin, view, tid, function()
+                                    if refresh_func then refresh_func() end
+                                end)
+                            end,
+                        }},
+                        {{
+                            text = _("Hide this tab"),
+                            callback = function()
+                                UIManager:close(dialog)
+                                MenuOrderManager:setTabHidden(view, tid, true)
+                                if refresh_func then refresh_func() end
+                            end,
+                        }},
+                    },
+                }
+                UIManager:show(dialog)
+            end,
+        }
+    end
+    for __, tab_id in ipairs(active_order) do
+        table.insert(sort_items, makeTabItem(tab_id))
+    end
+
+    local title_view = view == "reader" and _("Book view") or _("Normal view")
+    local sort_widget
+    sort_widget = SortWidget:new{
+        title = string.format("%s (%s)", _("Reorder menus"), title_view),
+        item_table = sort_items,
+        callback = function()
+            local source_items = (sort_widget and sort_widget.item_table) or sort_items
+            local new_tabs = {}
+            for __, sort_item in ipairs(source_items) do
+                local tid = sort_item.tab_id
+                if not MenuOrderManager:isItemHidden(view, tid) then
+                    table.insert(new_tabs, tid)
+                end
+            end
+            MenuOrderManager:reorderTabs(view, new_tabs)
+            self:saveAndApply(plugin, view)
+            if sort_widget then
+                sort_widget.marked = 0
+                sort_widget.orig_item_table = nil
+            end
+        end,
+    }
+    local orig_on_close = sort_widget.onClose
+    sort_widget.onClose = function(this)
+        local ret = orig_on_close(this)
+        if on_close_callback then
+            on_close_callback()
+        else
+            self:checkPromptRestartOnExit()
+        end
+        return ret
+    end
+    -- Top-level: add Edit submenu in hamburger, same as when continuing moving in submenu
+    local outer_self_tab = self
+    function sort_widget:onShowWidgetMenu()
+        local this = self
+        local dialog
+        local buttons = {
+            {{
+                text = _("Sort A to Z"),
+                align = "left",
+                callback = function()
+                    UIManager:close(dialog)
+                    this:sortItems("strcoll")
+                end,
+            }},
+            {{
+                text = _("Sort Z to A"),
+                align = "left",
+                callback = function()
+                    UIManager:close(dialog)
+                    this:sortItems("strcoll", true)
+                end,
+            }},
+            {{
+                text = _("Sort A to Z (natural)"),
+                align = "left",
+                callback = function()
+                    UIManager:close(dialog)
+                    this:sortItems("natural")
+                end,
+            }},
+            {{
+                text = _("Sort Z to A (natural)"),
+                align = "left",
+                callback = function()
+                    UIManager:close(dialog)
+                    this:sortItems("natural", true)
+                end,
+            }},
+        }
+        -- Edit submenu for marked top menu (mirrors showItemSortWidget continue-moving)
+        if this.marked > 0 then
+            local sel = this.item_table[this.marked]
+            if sel and sel.tab_id then
+                table.insert(buttons, 1, {{
+                    text = string.format(_("Edit submenu “%s” →"), MenuTitles:getTitle(sel.tab_id)),
+                    align = "left",
+                    callback = function()
+                        UIManager:close(dialog)
+                        outer_self_tab:showItemSortWidget(plugin, view, sel.tab_id, function()
+                            this:_populateItems()
+                        end)
+                    end,
+                }})
+            elseif sel and sel.is_submenu then
+                table.insert(buttons, 1, {{
+                    text = string.format(_("Edit submenu “%s” →"), MenuTitles:getTitle(sel.item_id or sel.tab_id)),
+                    align = "left",
+                    callback = function()
+                        UIManager:close(dialog)
+                        local mid = sel.item_id or sel.tab_id
+                        outer_self_tab:showItemSortWidget(plugin, view, mid, function()
+                            this:_populateItems()
+                        end)
+                    end,
+                }})
+            end
+        end
+        dialog = ButtonDialog:new{
+            shrink_unneeded_width = true,
+            buttons = buttons,
+            anchor = function()
+                return this.title_bar.left_button.image.dimen
+            end,
+        }
+        UIManager:show(dialog)
+        return true
+    end
+    UIManager:show(sort_widget)
+end
+
+-- =========================================================================
+-- Menu & Submenu Browser Screen - DIRECT to SortWidget (cleaned)
+-- =========================================================================
+
+function UIScreens:showMenuBrowser(plugin, view, on_close_callback)
+    -- Selection interface removed per request: just open unified reordering interface
+    -- Previously showed Menu with top tabs; now directly drills via SortWidget double-tap
+    return self:showTabReorderDialog(plugin, view, on_close_callback)
+end
+
+-- =========================================================================
+-- Menu Item Customizer Screen - DEPRECATED wrapper (kept for compatibility)
+-- Now simply forwards to the standard SortWidget interface.
+-- =========================================================================
+
+function UIScreens:showMenuItemCustomizer(plugin, view, menu_id, on_close_callback)
+    -- Compatibility shim: directly open unified SortWidget.
+    -- Previously this showed an intermediate menu with duplicate separator / per-item list.
+    -- Now all actions are inside SortWidget (drag, checkbox hide, hold to move, widget menu for separators).
+    return self:showItemSortWidget(plugin, view, menu_id, on_close_callback)
+end
+
+-- =========================================================================
+-- Item Sort Widget Screen - UNIFIED reordering interface
+-- Handles reorder, hide/show (checkbox), separators, move between menus via long-press
+-- =========================================================================
+
+function UIScreens:showItemSortWidget(plugin, view, menu_id, on_close_callback)
+    if plugin then self.plugin = plugin end
+    local menu_title = MenuTitles:getTitle(menu_id)
+    local items = MenuOrderManager:getMenuItems(view, menu_id)
+
+    local sort_widget
+
+    local function create_sep_item()
+        local this_entry
+        this_entry = {
+            text = _("--- Separator ---"),
+            item_id = MenuOrderManager.SEPARATOR_ID,
+            checked_func = function() return true end,
+            hold_callback = function(self_item, refresh_func)
+                UIManager:show(ConfirmBox:new{
+                    text = _("Delete this separator?"),
+                    ok_text = _("Delete"),
+                    ok_callback = function()
+                        if sort_widget and sort_widget.item_table then
+                            for i, sit in ipairs(sort_widget.item_table) do
+                                if sit == this_entry then
+                                    table.remove(sort_widget.item_table, i)
+                                    sort_widget.pages = math.ceil(#sort_widget.item_table / sort_widget.items_per_page)
+                                    if sort_widget.show_page > sort_widget.pages then
+                                        sort_widget.show_page = math.max(1, sort_widget.pages)
+                                    end
+                                    sort_widget.marked = 0
+                                    if refresh_func then refresh_func() end
+                                    UIManager:show(Notification:new{ text = _("Separator deleted.") })
+                                    break
+                                end
+                            end
+                        end
+                    end,
+                })
+            end,
+        }
+        return this_entry
+    end
+
+    -- Build ordered list: visible items + hidden items for this menu at bottom (unchecked)
+    local sort_items = {}
+    local seen_hidden = {}
+
+    local function makeSortItem(id, submenu_flag, disp_text)
+        local this_id = id
+        local is_sub = submenu_flag
+        local text_for_closure = disp_text
+        local submenu_cb = nil
+        if is_sub then
+            submenu_cb = function()
+                self:showItemSortWidget(plugin, view, this_id, function()
+                    if sort_widget then sort_widget:_populateItems() end
+                end)
+            end
+        end
+        return {
+            text = text_for_closure,
+            item_id = this_id,
+            is_submenu = is_sub,
+            onSubmenuTap = submenu_cb,
+            checked_func = function()
+                return not MenuOrderManager:isItemHidden(view, this_id)
+            end,
+            callback = function()
+                local is_hidden = MenuOrderManager:isItemHidden(view, this_id)
+                MenuOrderManager:setItemHidden(view, this_id, not is_hidden, menu_id)
+            end,
+            hold_callback = function(self_item, refresh_func)
+                local dialog
+                local is_sub2 = MenuOrderManager:isSubmenu(view, this_id)
+                local buttons = {
+                    {
+                        {
+                            text = _("Move to another menu…"),
+                            callback = function()
+                                UIManager:close(dialog)
+                                self:showDestinationMenuChooser(plugin, view, this_id, menu_id, function()
+                                    if refresh_func then refresh_func() end
+                                end)
+                            end,
+                        }
+                    },
+                    {
+                        {
+                            text = _("Hide this item"),
+                            callback = function()
+                                UIManager:close(dialog)
+                                MenuOrderManager:setItemHidden(view, this_id, true, menu_id)
+                                if refresh_func then refresh_func() end
+                            end,
+                        }
+                    },
+                }
+                if is_sub2 then
+                    table.insert(buttons, {
+                        {
+                            text = _("Edit submenu contents →"),
+                            callback = function()
+                                UIManager:close(dialog)
+                                self:showItemSortWidget(plugin, view, this_id, function()
+                                    if refresh_func then refresh_func() end
+                                end)
+                            end,
+                        }
+                    })
+                end
+                dialog = ButtonDialog:new{
+                    title = string.format(_("“%s”"), MenuTitles:getTitle(this_id)),
+                    title_align = "center",
+                    buttons = buttons,
+                }
+                UIManager:show(dialog)
+            end,
+        }
+    end
+
+    for idx, item_id in ipairs(items) do
+        local is_sep = (item_id == MenuOrderManager.SEPARATOR_ID)
+        if is_sep then
+            table.insert(sort_items, create_sep_item())
+        else
+            local item_title = MenuTitles:getTitle(item_id)
+            local is_submenu = MenuOrderManager:isSubmenu(view, item_id)
+            local display_text = string.format("%s%s", is_submenu and "[+] " or "", item_title)
+            table.insert(sort_items, makeSortItem(item_id, is_submenu, display_text))
+        end
+    end
+
+    -- Cache hidden for reuse and orphan deduplication
+    local hidden_for_menu = self:_getHiddenForMenu(view, menu_id)
+    local hidden_set = {}
+    for __, hid in ipairs(hidden_for_menu) do hidden_set[hid] = true end
+
+    -- Also include live orphans (new plugins like Storefront) not yet in order file
+    do
+        local ok_sorter, MenuSorter = pcall(require, "ui/menusorter")
+        if ok_sorter and plugin and plugin.ui and plugin.ui.menu and plugin.ui.menu.tab_item_table then
+            local live_menu = MenuSorter:findById(plugin.ui.menu.tab_item_table, menu_id)
+            if not live_menu then
+                for _, tab in ipairs(plugin.ui.menu.tab_item_table) do
+                    if tab.id == menu_id and tab.sub_item_table then live_menu = tab; break end
+                end
+            end
+            if live_menu and live_menu.sub_item_table then
+                local seen_ids = {}
+                for _, si in ipairs(sort_items) do if si.item_id then seen_ids[si.item_id] = true end end
+                for hid,_ in pairs(hidden_set) do seen_ids[hid] = true end
+                for _, live_item in ipairs(live_menu.sub_item_table) do
+                    local lid = live_item.id
+                    if lid and lid ~= MenuOrderManager.SEPARATOR_ID and not seen_ids[lid] and not hidden_set[lid] then
+                        if not MenuOrderManager:isItemHidden(view, lid) then
+                            local live_title = MenuTitles:getTitle(lid)
+                            local is_sub_live = MenuOrderManager:isSubmenu(view, lid)
+                            local disp = string.format("%s%s", is_sub_live and "[+] " or "", live_title)
+                            table.insert(sort_items, makeSortItem(lid, is_sub_live, disp))
+                            seen_ids[lid] = true
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    for __, hid in ipairs(hidden_for_menu) do
+        -- Only add if not already visible (shouldn't be)
+        local already = false
+        for __, it in ipairs(items) do
+            if it == hid then already = true; break end
+        end
+        if not already and not seen_hidden[hid] then
+            seen_hidden[hid] = true
+            local item_title = MenuTitles:getTitle(hid)
+            local is_submenu = MenuOrderManager:isSubmenu(view, hid)
+            local display_text = string.format("%s%s (%s)", is_submenu and "[+] " or "", item_title, _("hidden"))
+            local this_id = hid
+            table.insert(sort_items, {
+                text = display_text,
+                item_id = this_id,
+                dim = true,
+                checked_func = function()
+                    return false -- hidden => unchecked
+                end,
+                callback = function()
+                    -- Tapping checkbox restores
+                    MenuOrderManager:setItemHidden(view, this_id, false, menu_id)
+                end,
+                hold_callback = function(self_item, refresh_func)
+                    UIManager:show(ConfirmBox:new{
+                        text = string.format(_("Restore “%s” to this menu?"), MenuTitles:getTitle(this_id)),
+                        ok_text = _("Restore"),
+                        ok_callback = function()
+                            MenuOrderManager:setItemHidden(view, this_id, false, menu_id)
+                            if refresh_func then refresh_func() end
+                        end,
+                    })
+                end,
+            })
+        end
+    end
+
+    -- If no items and no hidden, add hint
+    if #sort_items == 0 then
+        table.insert(sort_items, {
+            text = _("(No items in this menu)"),
+            item_id = "__empty_hint__",
+            checked_func = function() return true end,
+            callback = function() end,
+        })
+    end
+
+    sort_widget = SortWidget:new{
+        title = string.format("%s - %s", _("Reorder"), menu_title),
+        item_table = sort_items,
+        callback = function()
+            local source_items = (sort_widget and sort_widget.item_table) or sort_items
+            local new_list = {}
+            for __, sort_item in ipairs(source_items) do
+                local iid = sort_item.item_id
+                if iid == "__empty_hint__" then
+                    -- skip hint
+                elseif iid == MenuOrderManager.SEPARATOR_ID or not MenuOrderManager:isItemHidden(view, iid) then
+                    table.insert(new_list, iid)
+                end
+            end
+            local order = MenuOrderManager:loadOrder(view)
+            order[menu_id] = new_list
+            self:saveAndApply(plugin, view)
+            -- Ensure check always goes up a level
+            if sort_widget then
+                sort_widget.marked = 0
+                sort_widget.orig_item_table = nil
+            end
+        end,
+    }
+
+    local orig_on_close = sort_widget.onClose
+    sort_widget.onClose = function(this)
+        local ret = orig_on_close(this)
+        if on_close_callback then
+            on_close_callback()
+        else
+            self:checkPromptRestartOnExit()
+        end
+        return ret
+    end
+
+    local outer_self_item = self
+    function sort_widget:onShowWidgetMenu()
+        local this = self
+        local dialog
+        local buttons = {
+            {{
+                text = _("Add separator at bottom"),
+                align = "left",
+                callback = function()
+                    UIManager:close(dialog)
+                    local new_sep = create_sep_item()
+                    -- Remove hint if present
+                    for i = #this.item_table, 1, -1 do
+                        if this.item_table[i].item_id == "__empty_hint__" then
+                            table.remove(this.item_table, i)
+                        end
+                    end
+                    table.insert(this.item_table, new_sep)
+                    this.pages = math.ceil(#this.item_table / this.items_per_page)
+                    this.show_page = this.pages
+                    this.marked = #this.item_table
+                    this:_populateItems()
+                    UIManager:show(Notification:new{ text = _("Separator added at bottom.") })
+                end,
+            }},
+            {{
+                text = _("Insert separator after current position"),
+                align = "left",
+                callback = function()
+                    UIManager:close(dialog)
+                    local insert_pos
+                    if this.marked > 0 then
+                        insert_pos = this.marked + 1
+                    else
+                        insert_pos = #this.item_table + 1
+                    end
+                    local new_sep = create_sep_item()
+                    for i = #this.item_table, 1, -1 do
+                        if this.item_table[i].item_id == "__empty_hint__" then
+                            table.remove(this.item_table, i)
+                            if insert_pos > #this.item_table + 1 then insert_pos = #this.item_table + 1 end
+                        end
+                    end
+                    table.insert(this.item_table, insert_pos, new_sep)
+                    this.pages = math.ceil(#this.item_table / this.items_per_page)
+                    this.show_page = math.ceil(insert_pos / this.items_per_page)
+                    this.marked = insert_pos
+                    this:_populateItems()
+                    UIManager:show(Notification:new{ text = _("Separator inserted after.") })
+                end,
+            }},
+            {{
+                text = _("Move item to another menu…"),
+                align = "left",
+                callback = function()
+                    UIManager:close(dialog)
+                    if this.marked > 0 and this.item_table[this.marked] then
+                        local iid = this.item_table[this.marked].item_id
+                        if iid and iid ~= MenuOrderManager.SEPARATOR_ID and iid ~= "__empty_hint__" then
+                            outer_self_item:showDestinationMenuChooser(plugin, view, iid, menu_id, function()
+                                this:_populateItems()
+                            end)
+                        else
+                            UIManager:show(InfoMessage:new{ text = _("Select a regular item first (tap to mark).") })
+                        end
+                    else
+                        UIManager:show(InfoMessage:new{ text = _("Mark an item first (tap its row), then use this to move it.") })
+                    end
+                end,
+            }},
+            {{
+                text = _("Sort A to Z"),
+                align = "left",
+                callback = function()
+                    UIManager:close(dialog)
+                    this:sortItems("strcoll")
+                end,
+            }},
+            {{
+                text = _("Sort Z to A"),
+                align = "left",
+                callback = function()
+                    UIManager:close(dialog)
+                    this:sortItems("strcoll", true)
+                end,
+            }},
+            {{
+                text = _("Sort A to Z (natural)"),
+                align = "left",
+                callback = function()
+                    UIManager:close(dialog)
+                    this:sortItems("natural")
+                end,
+            }},
+            {{
+                text = _("Sort Z to A (natural)"),
+                align = "left",
+                callback = function()
+                    UIManager:close(dialog)
+                    this:sortItems("natural", true)
+                end,
+            }},
+        }
+        -- New option when selecting a submenu: edit its contents (native Menu/ButtonDialog pattern)
+        if this.marked > 0 then
+            local sel = this.item_table[this.marked]
+            if sel and sel.item_id and MenuOrderManager:isSubmenu(view, sel.item_id) then
+                table.insert(buttons, 4, {{
+                    text = string.format(_("Edit submenu “%s” →"), MenuTitles:getTitle(sel.item_id)),
+                    align = "left",
+                    callback = function()
+                        UIManager:close(dialog)
+                        outer_self_item:showItemSortWidget(plugin, view, sel.item_id, function()
+                            this:_populateItems()
+                        end)
+                    end,
+                }})
+            end
+        end
+        dialog = ButtonDialog:new{
+            shrink_unneeded_width = true,
+            buttons = buttons,
+            anchor = function()
+                return this.title_bar.left_button.image.dimen
+            end,
+        }
+        UIManager:show(dialog)
+        return true
+    end
+
+    UIManager:show(sort_widget)
+end
+
+-- =========================================================================
+-- Detailed Item Action Dialog (kept for search & compatibility)
+-- Now streamlined: only used via search results or hold callback
+-- =========================================================================
+
+function UIScreens:showItemActionDialog(plugin, view, menu_id, item_id, idx, on_update_callback)
+    if plugin then self.plugin = plugin end
+    local is_sep = (item_id == MenuOrderManager.SEPARATOR_ID)
+    local item_title = is_sep and _("Separator") or MenuTitles:getTitle(item_id)
+    local items = MenuOrderManager:getMenuItems(view, menu_id)
+    local total_items = #items
+
+    local actions = {}
+
+    if not is_sep then
+        if idx > 1 then
+            table.insert(actions, {
+                text = _("Move up"),
+                callback = function()
+                    MenuOrderManager:moveItem(view, menu_id, idx, idx - 1)
+                    self:saveAndApply(plugin, view)
+                    on_update_callback()
+                end,
+            })
+        end
+        if idx < total_items then
+            table.insert(actions, {
+                text = _("Move down"),
+                callback = function()
+                    MenuOrderManager:moveItem(view, menu_id, idx, idx + 1)
+                    self:saveAndApply(plugin, view)
+                    on_update_callback()
+                end,
+            })
+        end
+        if idx > 1 then
+            table.insert(actions, {
+                text = _("Move to top"),
+                callback = function()
+                    MenuOrderManager:moveItem(view, menu_id, idx, 1)
+                    self:saveAndApply(plugin, view)
+                    on_update_callback()
+                end,
+            })
+        end
+        if idx < total_items then
+            table.insert(actions, {
+                text = _("Move to bottom"),
+                callback = function()
+                    MenuOrderManager:moveItem(view, menu_id, idx, total_items)
+                    self:saveAndApply(plugin, view)
+                    on_update_callback()
+                end,
+            })
+        end
+        table.insert(actions, {
+            text = _("Move to another menu…"),
+            separator = true,
+            callback = function()
+                self:showDestinationMenuChooser(plugin, view, item_id, menu_id, on_update_callback)
+            end,
+        })
+        table.insert(actions, {
+            text = _("Hide / disable this item"),
+            callback = function()
+                MenuOrderManager:setItemHidden(view, item_id, true, menu_id)
+                self:saveAndApply(plugin, view)
+                on_update_callback()
+            end,
+        })
+        if MenuOrderManager:isSubmenu(view, item_id) then
+            table.insert(actions, {
+                text = _("Open and reorder this submenu"),
+                separator = true,
+                callback = function()
+                    self:showItemSortWidget(plugin, view, item_id, on_update_callback)
+                end,
+            })
+        end
+    else
+        if idx > 1 then
+            table.insert(actions, {
+                text = _("Move separator up"),
+                callback = function()
+                    MenuOrderManager:moveItem(view, menu_id, idx, idx - 1)
+                    self:saveAndApply(plugin, view)
+                    on_update_callback()
+                end,
+            })
+        end
+        if idx < total_items then
+            table.insert(actions, {
+                text = _("Move separator down"),
+                callback = function()
+                    MenuOrderManager:moveItem(view, menu_id, idx, idx + 1)
+                    self:saveAndApply(plugin, view)
+                    on_update_callback()
+                end,
+            })
+        end
+        table.insert(actions, {
+            text = _("Delete separator"),
+            callback = function()
+                MenuOrderManager:removeSeparator(view, menu_id, idx)
+                self:saveAndApply(plugin, view)
+                on_update_callback()
+            end,
+        })
+    end
+
+    local action_dialog
+    action_dialog = Menu:new{
+        title = string.format("%s: %s", _("Action for"), item_title),
+        item_table = actions,
+    }
+    UIManager:show(action_dialog)
+end
+
+-- =========================================================================
+-- Destination Menu Chooser (Move item to another tab or submenu)
+-- =========================================================================
+
+function UIScreens:showDestinationMenuChooser(plugin, view, item_id, from_menu_id, on_moved_callback)
+    if plugin then self.plugin = plugin end
+    local all_menus = MenuOrderManager:getAllMenusAndSubmenus(view)
+    local choices = {}
+
+    for __, entry in ipairs(all_menus) do
+        local target_mid = entry.id
+        if target_mid ~= from_menu_id then
+            local is_tab = entry.is_tab
+            local title = MenuTitles:getTitle(target_mid)
+            local prefix = is_tab and "[Tab] " or "[Menu] "
+
+            table.insert(choices, {
+                text = string.format("%s%s", prefix, title),
+                callback = function()
+                    MenuOrderManager:moveItemToMenu(view, item_id, from_menu_id, target_mid)
+                    self:saveAndApply(plugin, view)
+                    UIManager:show(Notification:new{
+                        text = string.format(_("Moved to %s."), title),
+                    })
+                    on_moved_callback()
+                end,
+            })
+        end
+    end
+
+    local chooser_dialog
+    chooser_dialog = Menu:new{
+        title = string.format(_("Move “%s” to:"), MenuTitles:getTitle(item_id)),
+        item_table = choices,
+    }
+    UIManager:show(chooser_dialog)
+end
+
+-- =========================================================================
+-- Hidden Items Manager Screen
+-- =========================================================================
+
+function UIScreens:showHiddenItemsManager(plugin, view, on_close_callback)
+    if plugin then self.plugin = plugin end
+    local disabled = MenuOrderManager:getDisabledItems(view)
+    local function refresh()
+        self:showHiddenItemsManager(plugin, view, on_close_callback)
+    end
+
+    if #disabled == 0 then
+        UIManager:show(InfoMessage:new{
+            text = _("No items are currently hidden in this view."),
+        })
+        return
+    end
+
+    local items = {
+        {
+            text = _("Unhide all items"),
+            callback = function()
+                UIManager:show(ConfirmBox:new{
+                    text = _("Unhide and restore all hidden items to their default locations?"),
+                    ok_text = _("Unhide all"),
+                    ok_callback = function()
+                        for __, id in ipairs(util.tableDeepCopy(disabled)) do
+                            MenuOrderManager:setItemHidden(view, id, false)
+                        end
+                        self:saveAndApply(plugin, view)
+                        if on_close_callback then on_close_callback() end
+                    end,
+                })
+            end,
+            separator = true,
+        },
+    }
+
+    for __, item_id in ipairs(disabled) do
+        local title = MenuTitles:getTitle(item_id)
+        local desc = MenuTitles:getDescription(item_id)
+        local label = desc and string.format("%s (%s)", title, desc) or title
+
+        table.insert(items, {
+            text = label,
+            help_text = _("Tap to unhide and restore this item."),
+            callback = function()
+                MenuOrderManager:setItemHidden(view, item_id, false)
+                self:saveAndApply(plugin, view)
+                UIManager:show(Notification:new{
+                    text = string.format(_("Restored “%s”."), title),
+                })
+                refresh()
+            end,
+        })
+    end
+
+    local dialog
+    dialog = Menu:new{
+        title = string.format("%s (%d)", _("Hidden items"), #disabled),
+        item_table = items,
+        on_close = function()
+            if on_close_callback then
+                on_close_callback()
+            else
+                self:checkPromptRestartOnExit()
+            end
+        end,
+    }
+    UIManager:show(dialog)
+end
+
+-- =========================================================================
+-- Search Dialog & Search Results
+-- =========================================================================
+
+function UIScreens:showSearchDialog(plugin, view, on_close_callback)
+    if plugin then self.plugin = plugin end
+    local input_dialog
+    input_dialog = InputDialog:new{
+        title = _("Search menu items"),
+        input_hint = _("e.g. font, wifi, timer, toc, gesture"),
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function()
+                        UIManager:close(input_dialog)
+                        if on_close_callback then
+                            on_close_callback()
+                        else
+                            self:checkPromptRestartOnExit()
+                        end
+                    end,
+                },
+                {
+                    text = _("Search"),
+                    is_enter_default = true,
+                    callback = function()
+                        local query = input_dialog:getInputText()
+                        UIManager:close(input_dialog)
+                        if query and query:match("%S") then
+                            self:showSearchResults(plugin, view, query, on_close_callback)
+                        else
+                            if on_close_callback then
+                                on_close_callback()
+                            else
+                                self:checkPromptRestartOnExit()
+                            end
+                        end
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(input_dialog)
+    input_dialog:onShowKeyboard()
+end
+
+function UIScreens:showSearchResults(plugin, view, query, on_close_callback)
+    if plugin then self.plugin = plugin end
+    local clean_query = query:lower():gsub("^%s+", ""):gsub("%s+$", "")
+    local all_menus = MenuOrderManager:getAllMenusAndSubmenus(view)
+    local disabled = MenuOrderManager:getDisabledItems(view)
+
+    local matches = {}
+    local seen = {}
+
+    for __, menu_entry in ipairs(all_menus) do
+        local mid = menu_entry.id
+        local items = MenuOrderManager:getMenuItems(view, mid)
+        for idx, item_id in ipairs(items) do
+            if item_id ~= MenuOrderManager.SEPARATOR_ID and not seen[item_id] then
+                local title = MenuTitles:getTitle(item_id):lower()
+                if item_id:lower():find(clean_query, 1, true) or title:find(clean_query, 1, true) then
+                    seen[item_id] = true
+                    table.insert(matches, {
+                        item_id = item_id,
+                        menu_id = mid,
+                        idx = idx,
+                        is_hidden = false,
+                    })
+                end
+            end
+        end
+    end
+
+    for __, item_id in ipairs(disabled) do
+        if not seen[item_id] then
+            local title = MenuTitles:getTitle(item_id):lower()
+            if item_id:lower():find(clean_query, 1, true) or title:find(clean_query, 1, true) then
+                seen[item_id] = true
+                table.insert(matches, {
+                    item_id = item_id,
+                    menu_id = nil,
+                    idx = nil,
+                    is_hidden = true,
+                })
+            end
+        end
+    end
+
+    if #matches == 0 then
+        UIManager:show(InfoMessage:new{
+            text = string.format(_("No menu items matching “%s” were found."), query),
+        })
+        return
+    end
+
+    local result_items = {}
+    for __, match in ipairs(matches) do
+        local item_id = match.item_id
+        local title = MenuTitles:getTitle(item_id)
+        local location = match.is_hidden and _("Hidden") or MenuTitles:getTitle(match.menu_id)
+        local status_prefix = match.is_hidden and "[Hidden] " or ""
+        local row_text = string.format("%s%s [%s: %s]", status_prefix, title, _("in"), location)
+
+        table.insert(result_items, {
+            text = row_text,
+            callback = function()
+                if match.is_hidden then
+                    MenuOrderManager:setItemHidden(view, item_id, false)
+                    self:saveAndApply(plugin, view)
+                    UIManager:show(Notification:new{
+                        text = string.format(_("Unhid “%s”."), title),
+                    })
+                    self:showSearchResults(plugin, view, query, on_close_callback)
+                else
+                    self:showItemActionDialog(plugin, view, match.menu_id, item_id, match.idx, function()
+                        self:showSearchResults(plugin, view, query, on_close_callback)
+                    end)
+                end
+            end,
+        })
+    end
+
+    local results_dialog
+    results_dialog = Menu:new{
+        title = string.format(_("Search: “%s” (%d found)"), query, #matches),
+        item_table = result_items,
+        on_close = function()
+            if on_close_callback then
+                on_close_callback()
+            else
+                self:checkPromptRestartOnExit()
+            end
+        end,
+    }
+    UIManager:show(results_dialog)
+end
+
+-- =========================================================================
+-- Raw Configuration Viewer (TextViewer)
+-- =========================================================================
+
+function UIScreens:showRawConfigViewer(plugin, view)
+    local order = MenuOrderManager:loadOrder(view)
+    local serialized = "-- Configuration for " .. (view == "reader" and "Book view" or "Normal view") .. "\nreturn " .. dump(order, nil, true)
+    local viewer = TextViewer:new{
+        title = string.format("%s (%s)", _("Menu configuration"), view == "reader" and _("Book view") or _("Normal view")),
+        text = serialized,
+        alignment = "left",
+        auto_para_direction = false,
+    }
+    UIManager:show(viewer)
+end
+
+-- =========================================================================
+-- Preset Management UI
+-- =========================================================================
+
+function UIScreens:showPresetsMenu(plugin, view, on_close_callback)
+    if plugin then self.plugin = plugin end
+    local view_label = (view == "reader") and _("Book view") or _("Normal view")
+    local presets = MenuOrderManager:getAllPresets(view)
+    local user_presets = MenuOrderManager:listUserPresets(view)
+
+    local items = {}
+    local menu_dialog
+
+    -- Save action at top (normal menu entry) - close current before opening save dialog to avoid stacking
+    table.insert(items, {
+        text = _("Save current as preset…"),
+        help_text = _("Save the current menu layout with a custom name."),
+        callback = function()
+            UIManager:close(menu_dialog)
+            self:showSavePresetDialog(plugin, view, function()
+                self:showPresetsMenu(plugin, view, on_close_callback)
+            end)
+        end,
+        separator = true,
+    })
+
+    -- Direct list of all presets in the same normal Menu (no additional interface)
+    for __, preset in ipairs(presets) do
+        local prefix = preset.is_builtin and "[Built-in] " or "[Custom] "
+        -- capture preset for closure
+        local cur_preset = preset
+        table.insert(items, {
+            text = prefix .. cur_preset.name,
+            help_text = cur_preset.description,
+            callback = function()
+                UIManager:show(ConfirmBox:new{
+                    text = string.format(_("Apply preset “%s”?"), cur_preset.name),
+                    ok_text = _("Apply"),
+                    ok_callback = function()
+                        local ok, err = MenuOrderManager:loadPreset(view, cur_preset)
+                        if ok then
+                            self.needs_restart = true
+                            if plugin and plugin.ui then
+                                MenuOrderManager:applyLiveReload(plugin.ui, view)
+                            end
+                            UIManager:close(menu_dialog)
+                            UIManager:show(Notification:new{
+                                text = string.format(_("Loaded preset “%s”."), cur_preset.name),
+                            })
+                            if on_close_callback then
+                                -- Don't call directly, let on_close handle it to avoid double stacking
+                                -- on_close will be triggered by UIManager:close above
+                            end
+                        else
+                            UIManager:show(InfoMessage:new{
+                                text = string.format(_("Failed to load preset:\n%s"), tostring(err)),
+                            })
+                        end
+                    end,
+                })
+            end,
+        })
+    end
+
+    -- Delete action at bottom if any deletable presets exist (custom + built-ins except default)
+    local deletable = MenuOrderManager:listDeletablePresets(view)
+    if #deletable > 0 then
+        table.insert(items, {
+            text = _("Delete preset…"),
+            help_text = _("Remove a custom or built-in preset (default cannot be deleted)."),
+            callback = function()
+                UIManager:close(menu_dialog)
+                self:showDeletePresetMenu(plugin, view, function()
+                    self:showPresetsMenu(plugin, view, on_close_callback)
+                end)
+            end,
+            separator = true,
+        })
+    end
+
+    menu_dialog = Menu:new{
+        title = string.format("%s - %s", _("Presets"), view_label),
+        item_table = items,
+        on_close = function()
+            if on_close_callback then
+                on_close_callback()
+            else
+                self:checkPromptRestartOnExit()
+            end
+        end,
+    }
+    UIManager:show(menu_dialog)
+end
+
+function UIScreens:showLoadPresetMenu(plugin, view, on_close_callback)
+    if plugin then self.plugin = plugin end
+    local presets = MenuOrderManager:getAllPresets(view)
+    local items = {}
+
+    for __, preset in ipairs(presets) do
+        local prefix = preset.is_builtin and "[Built-in] " or "[Custom] "
+        table.insert(items, {
+            text = prefix .. preset.name,
+            help_text = preset.description,
+            callback = function()
+                local ok, err = MenuOrderManager:loadPreset(view, preset)
+                if ok then
+                    self.needs_restart = true
+                    if plugin and plugin.ui then
+                        MenuOrderManager:applyLiveReload(plugin.ui, view)
+                    end
+                    UIManager:show(Notification:new{
+                        text = string.format(_("Loaded preset “%s”."), preset.name),
+                    })
+                    if on_close_callback then on_close_callback() end
+                else
+                    UIManager:show(InfoMessage:new{
+                        text = string.format(_("Failed to load preset:\n%s"), tostring(err)),
+                    })
+                end
+            end,
+        })
+    end
+
+    local dialog
+    dialog = Menu:new{
+        title = _("Select preset to load"),
+        item_table = items,
+        on_close = on_close_callback,
+    }
+    UIManager:show(dialog)
+end
+
+function UIScreens:showSavePresetDialog(plugin, view, on_close_callback)
+    if plugin then self.plugin = plugin end
+    local input_dialog
+    input_dialog = InputDialog:new{
+        title = _("Save layout as preset"),
+        input_hint = _("e.g. My Reading Layout"),
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function()
+                        UIManager:close(input_dialog)
+                        if on_close_callback then on_close_callback() end
+                    end,
+                },
+                {
+                    text = _("Save"),
+                    is_enter_default = true,
+                    callback = function()
+                        local name = input_dialog:getInputText()
+                        UIManager:close(input_dialog)
+                        if name and name:match("%S") then
+                            local ok, res = MenuOrderManager:savePreset(view, name)
+                            if ok then
+                                UIManager:show(Notification:new{
+                                    text = string.format(_("Saved preset “%s”."), name),
+                                })
+                            else
+                                UIManager:show(InfoMessage:new{
+                                    text = string.format(_("Error saving preset:\n%s"), tostring(res)),
+                                })
+                            end
+                        end
+                        if on_close_callback then on_close_callback() end
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(input_dialog)
+    input_dialog:onShowKeyboard()
+end
+
+function UIScreens:showDeletePresetMenu(plugin, view, on_close_callback)
+    if plugin then self.plugin = plugin end
+    local deletable = MenuOrderManager:listDeletablePresets(view)
+
+    if #deletable == 0 then
+        UIManager:show(InfoMessage:new{
+            text = _("No presets to delete (default cannot be deleted)."),
+        })
+        if on_close_callback then on_close_callback() end
+        return
+    end
+
+    local items = {}
+    local dialog
+    for __, preset in ipairs(deletable) do
+        local cur_preset = preset
+        local is_builtin = cur_preset.is_builtin
+        local label = (is_builtin and "[Built-in] " or "[Custom] ") .. cur_preset.name
+        local help = is_builtin and _("Delete built-in preset (can be restored by resetting hidden file).") or _("Delete custom preset file.")
+        if cur_preset.id == "builtin_default" then
+            help = _("Default cannot be deleted.")
+        end
+        table.insert(items, {
+            text = label,
+            help_text = help,
+            callback = function()
+                local confirm_text
+                if is_builtin then
+                    confirm_text = string.format(_("Delete built-in preset “%s”?"), cur_preset.name)
+                else
+                    confirm_text = string.format(_("Delete custom preset “%s”?"), cur_preset.name)
+                end
+                UIManager:show(ConfirmBox:new{
+                    text = confirm_text,
+                    ok_text = _("Delete"),
+                    ok_callback = function()
+                        local ok, err = MenuOrderManager:deletePreset(view, cur_preset.id)
+                        if not ok then
+                            -- Fallback try name
+                            ok, err = MenuOrderManager:deletePreset(view, cur_preset.name)
+                        end
+                        if ok then
+                            UIManager:show(Notification:new{
+                                text = string.format(_("Deleted preset “%s”."), cur_preset.name),
+                            })
+                            -- Close this delete menu before going back to parent to avoid stacking
+                            if dialog then
+                                -- Prevent on_close from re-triggering parent twice
+                                local cb = dialog.on_close
+                                dialog.on_close = nil
+                                UIManager:close(dialog)
+                                if cb then cb() end
+                                -- Also call the passed on_close_callback to refresh parent
+                                if on_close_callback and cb ~= on_close_callback then
+                                    on_close_callback()
+                                end
+                            else
+                                if on_close_callback then on_close_callback() end
+                            end
+                        else
+                            UIManager:show(InfoMessage:new{
+                                text = tostring(err or _("Failed to delete.")),
+                            })
+                        end
+                    end,
+                })
+            end,
+        })
+    end
+
+    dialog = Menu:new{
+        title = _("Select preset to delete"),
+        item_table = items,
+        on_close = on_close_callback,
+    }
+    UIManager:show(dialog)
+end
+
+return UIScreens
