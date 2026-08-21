@@ -26,6 +26,14 @@ local MenuOrderManager = {
         reader = nil,
         filemanager = nil,
     },
+    -- KOReader's rebuilt live menu tree may lag one refresh behind a saved
+    -- cross-menu move. Keep the authoritative destination for this session so
+    -- the editor does not re-import the stale source row or filter the item out
+    -- of its new destination before the next complete menu rebuild/restart.
+    recent_moves = {
+        reader = {},
+        filemanager = {},
+    },
 }
 
 local function getSettingsPath(view)
@@ -127,10 +135,15 @@ function MenuOrderManager:resetOrder(view)
     end
     self.orders[view] = nil
     self.backups[view] = nil
+    self.recent_moves[view] = {}
     -- Invalidate module cache
     package.loaded["ui/elements/reader_menu_order"] = nil
     package.loaded["ui/elements/filemanager_menu_order"] = nil
     return true
+end
+
+function MenuOrderManager:getRecentMoves(view)
+    return util.tableDeepCopy(self.recent_moves[view] or {})
 end
 
 function MenuOrderManager:resetTabsOnly(view)
@@ -147,6 +160,7 @@ function MenuOrderManager:resetTabsOnly(view)
         end
     end
     order["KOMenu:disabled"] = new_disabled
+    self.recent_moves[view] = {}
     return true
 end
 
@@ -167,6 +181,7 @@ function MenuOrderManager:resetSubmenu(view, menu_id)
         end
     end
     order["KOMenu:disabled"] = new_disabled
+    self.recent_moves[view] = {}
     return true
 end
 
@@ -179,6 +194,7 @@ end
 function MenuOrderManager:restoreOrder(view)
     if self.backups[view] then
         self.orders[view] = util.tableDeepCopy(self.backups[view])
+        self.recent_moves[view] = {}
         return true
     end
     return false
@@ -456,12 +472,6 @@ function MenuOrderManager:canMoveItemToMenu(view, item_id, from_menu_id, to_menu
         end
     end
 
-    for _, id in ipairs(order[to_menu_id]) do
-        if id == item_id then
-            return false, _("The destination menu already contains this item.")
-        end
-    end
-
     if type(order[item_id]) == "table" then
         if to_menu_id == item_id then
             return false, _("A submenu cannot be moved into itself.")
@@ -478,10 +488,17 @@ function MenuOrderManager:moveItemToMenu(view, item_id, from_menu_id, to_menu_id
     local can_move, err = self:canMoveItemToMenu(view, item_id, from_menu_id, to_menu_id)
     if not can_move then return false, err end
 
-    -- Remove from from_menu
-    for i = #order[from_menu_id], 1, -1 do
-        if order[from_menu_id][i] == item_id then
-            table.remove(order[from_menu_id], i)
+    -- An older editor could save its stale source model after a move and leave
+    -- the same ID under two parents. Remove every configured reference before
+    -- inserting the authoritative destination, which both prevents and repairs
+    -- that corruption while keeping the submenu's own contents untouched.
+    for menu_id, menu_items in pairs(order) do
+        if menu_id ~= "KOMenu:disabled" and type(menu_items) == "table" then
+            for i = #menu_items, 1, -1 do
+                if menu_items[i] == item_id then
+                    table.remove(menu_items, i)
+                end
+            end
         end
     end
 
@@ -494,6 +511,8 @@ function MenuOrderManager:moveItemToMenu(view, item_id, from_menu_id, to_menu_id
 
     -- Ensure item is not disabled
     self:setItemHidden(view, item_id, false, to_menu_id)
+    self.recent_moves[view] = self.recent_moves[view] or {}
+    self.recent_moves[view][item_id] = to_menu_id
     return true
 end
 
@@ -1117,6 +1136,7 @@ function MenuOrderManager:loadPreset(view, preset)
     end
 
     self.orders[view] = order
+    self.recent_moves[view] = {}
     local ok, res = self:saveOrder(view)
     return ok, res
 end

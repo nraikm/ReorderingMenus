@@ -84,11 +84,62 @@ end
 local function getTopSortWidget()
     for i = #UIManager._window_stack, 1, -1 do
         local w = UIManager._window_stack[i].widget
-        if w and w.item_table then
+        if w and w.item_table and w.marked ~= nil
+                and type(w._populateItems) == "function" then
             return w
         end
     end
     return nil
+end
+
+local function getTopButtonDialog()
+    for i = #UIManager._window_stack, 1, -1 do
+        local entry = UIManager._window_stack[i]
+        local widget = entry and (entry.widget or entry)
+        if widget and widget.buttontable and widget.buttontable.buttons then
+            return widget
+        end
+    end
+    return nil
+end
+
+local function getMoveChooser()
+    for i = #UIManager._window_stack, 1, -1 do
+        local entry = UIManager._window_stack[i]
+        local widget = entry and (entry.widget or entry)
+        if widget and widget.item_table and widget.title
+                and widget.title:find("Move", 1, true) then
+            return widget
+        end
+    end
+    return nil
+end
+
+local function findButton(dialog, text)
+    for _, row in ipairs(dialog and dialog.buttontable.buttons or {}) do
+        for _, button in ipairs(row) do
+            if button.text == text then return button end
+        end
+    end
+    return nil
+end
+
+local function findSortItem(widget, item_id)
+    for i, item in ipairs(widget and widget.item_table or {}) do
+        if item.item_id == item_id then return i, item end
+    end
+    return nil, nil
+end
+
+local function selectMoveDestination(chooser, menu_id)
+    local title = MenuTitles:getTitle(menu_id)
+    for _, choice in ipairs(chooser and chooser.item_table or {}) do
+        if choice.text:find(title, 1, true) then
+            choice.callback()
+            return true
+        end
+    end
+    return false
 end
 
 -- 2. Test live-menu filtering and newly registered plugin discovery
@@ -331,15 +382,151 @@ local ok, err = pcall(function()
 end)
 assert_true(ok, "Safe submenu destination chooser completed cleanly: " .. tostring(err))
 
--- 6. Test Cross-Menu Movement Simulation
-print("\n--- Test 6: Cross-Menu Item Movement Simulation ---")
+-- 6. Test the complete editor workflow after cross-menu moves. This covers
+-- the stale SortWidget model that previously reinserted moved items when the
+-- user next added a separator, sorted, or pressed the checkmark.
+print("\n--- Test 6: Cross-Menu Editor State Synchronization ---")
 local ok, err = pcall(function()
-    MenuOrderManager:moveItemToMenu("reader", "read_timer", "tools", "navi", 1)
-    UIScreens:saveAndApply(plugin, "reader")
-    local navi_items = MenuOrderManager:getMenuItems("reader", "navi")
-    assert_eq(navi_items[1], "read_timer", "read_timer moved to navi index 1")
+    MenuOrderManager:resetOrder("reader")
+
+    -- Register a deterministic plugin-style item because this lightweight
+    -- ReaderMenu fixture does not instantiate every real Reader module.
+    mock_ui_reader.menu:registerToMainMenu({
+        name = "cross_menu_move_fixture",
+        addToMainMenu = function(_, menu_items)
+            menu_items.cross_menu_move_fixture = {
+                text = "Cross-menu move fixture",
+                sorting_hint = "navi",
+            }
+        end,
+    })
+    mock_ui_reader.menu.tab_item_table = nil
+
+    -- Move a regular item through the actual hamburger/chooser callbacks.
+    UIScreens:showItemSortWidget(plugin, "reader", "navi")
+    local source_widget = getTopSortWidget()
+    local moved_item_id
+    local moved_item_index
+    for i, item in ipairs(source_widget.item_table) do
+        if item.item_id ~= MenuOrderManager.SEPARATOR_ID
+                and item.item_id ~= "__empty_hint__" and not item.is_submenu then
+            moved_item_id = item.item_id
+            moved_item_index = i
+            break
+        end
+    end
+    assert_true(moved_item_index ~= nil, "A regular item starts in the open Navigation editor")
+
+    local function countSeparators(items)
+        local count = 0
+        for _, item in ipairs(items or {}) do
+            local item_id = type(item) == "table" and item.item_id or item
+            if item_id == MenuOrderManager.SEPARATOR_ID then count = count + 1 end
+        end
+        return count
+    end
+    local original_separator_count = countSeparators(MenuOrderManager:getMenuItems("reader", "navi"))
+
+    -- Add an unsaved separator first; selecting a destination must stage this
+    -- current UI model into the same atomic move/save.
+    source_widget.marked = moved_item_index
+    source_widget:onShowWidgetMenu()
+    local before_move_actions = getTopButtonDialog()
+    local insert_separator = findButton(before_move_actions, "Insert separator after selection")
+    assert_true(insert_separator ~= nil, "Pending source edit can be made before moving")
+    insert_separator.callback()
+    assert_eq(countSeparators(source_widget.item_table), original_separator_count + 1,
+        "Pending separator exists in the source editor")
+
+    moved_item_index = findSortItem(source_widget, moved_item_id)
+    source_widget.marked = moved_item_index
+    source_widget:onShowWidgetMenu()
+    local source_actions = getTopButtonDialog()
+    local move_button = findButton(source_actions, "Move item to another menu…")
+    assert_true(move_button ~= nil, "Move action is available for the selected item")
+    move_button.callback()
+    local chooser = getMoveChooser()
+    assert_true(chooser ~= nil, "Destination chooser opened from the live editor")
+    assert_true(selectMoveDestination(chooser, "tools"), "Tools destination selected")
+
+    assert_eq(findSortItem(source_widget, moved_item_id), nil,
+        "Moved item disappears from the source editor immediately")
+    assert_eq(source_widget.marked, 0, "Source selection is cleared after moving")
+    assert_eq(MenuOrderManager:getParentMenu("reader", moved_item_id), "tools",
+        "Moved item has the destination as its authoritative parent")
+    assert_eq(countSeparators(MenuOrderManager:getMenuItems("reader", "navi")),
+        original_separator_count + 1, "Move save includes pending source editor changes")
+
+    -- Perform the next '+' menu action and save from the still-open source.
+    -- This used to write the moved item back from the stale item_table.
+    source_widget:onShowWidgetMenu()
+    local post_move_actions = getTopButtonDialog()
+    local add_separator = findButton(post_move_actions, "Add separator at bottom")
+    assert_true(add_separator ~= nil, "Source editor remains usable after the move")
+    add_separator.callback()
+    source_widget:onReturn()
+    assert_eq(MenuOrderManager:getParentMenu("reader", moved_item_id), "tools",
+        "Saving a subsequent source edit does not undo the move")
+    assert_eq(countSeparators(MenuOrderManager:getMenuItems("reader", "navi")),
+        original_separator_count + 2, "Subsequent separator edit is saved in the source")
+
+    UIScreens:showItemSortWidget(plugin, "reader", "navi")
+    local refreshed_source_widget = getTopSortWidget()
+    assert_eq(findSortItem(refreshed_source_widget, moved_item_id), nil,
+        "A fresh source editor suppresses KOReader's stale live copy")
+
+    -- The destination must expose the moved row and allow another reorder/save.
+    UIScreens:showItemSortWidget(plugin, "reader", "tools")
+    local destination_widget = getTopSortWidget()
+    local moved_index, moved_entry = findSortItem(destination_widget, moved_item_id)
+    assert_true(moved_index ~= nil, "Moved item appears in a freshly opened destination editor")
+    table.remove(destination_widget.item_table, moved_index)
+    table.insert(destination_widget.item_table, 1, moved_entry)
+    destination_widget.marked = 1
+    destination_widget:onReturn()
+    assert_eq(MenuOrderManager:getMenuItems("reader", "tools")[1], moved_item_id,
+        "Moved item can be reordered and saved in its destination")
+    assert_eq(MenuOrderManager:getParentMenu("reader", moved_item_id), "tools",
+        "Destination save retains the updated parent")
+
+    -- A moved submenu must also reappear as an editable [+] row in its new
+    -- parent, with its own children and callbacks intact.
+    UIScreens:showItemSortWidget(plugin, "reader", "tools")
+    local submenu_source = getTopSortWidget()
+    local more_tools_index = findSortItem(submenu_source, "more_tools")
+    assert_true(more_tools_index ~= nil, "More tools starts in Tools")
+    submenu_source.marked = more_tools_index
+    submenu_source:onShowWidgetMenu()
+    local submenu_actions = getTopButtonDialog()
+    local submenu_move = findButton(submenu_actions, "Move item to another menu…")
+    assert_true(submenu_move ~= nil, "Move action is available for the submenu")
+    submenu_move.callback()
+    local submenu_chooser = getMoveChooser()
+    assert_true(selectMoveDestination(submenu_chooser, "setting"), "Settings destination selected")
+    assert_eq(findSortItem(submenu_source, "more_tools"), nil,
+        "Moved submenu disappears from its old parent editor")
+
+    UIScreens:showItemSortWidget(plugin, "reader", "setting")
+    local settings_widget = getTopSortWidget()
+    local moved_submenu_index, moved_submenu_entry = findSortItem(settings_widget, "more_tools")
+    assert_true(moved_submenu_index ~= nil, "Moved submenu appears in the Settings editor")
+    assert_true(moved_submenu_entry.is_submenu, "Moved submenu keeps its [+] submenu identity")
+    assert_true(type(moved_submenu_entry.onSubmenuTap) == "function",
+        "Moved submenu keeps its open/edit callback")
+    moved_submenu_entry.onSubmenuTap()
+    local nested_widget = getTopSortWidget()
+    assert_true(nested_widget.title:find(MenuTitles:getTitle("more_tools"), 1, true) ~= nil,
+        "Clicking the moved [+] row opens the correct submenu editor")
+    assert_true(findSortItem(nested_widget, "plugin_management") ~= nil,
+        "Moved submenu editor retains its nested menu items")
+
+    -- Saving the destination after the submenu move must not change its parent.
+    settings_widget.marked = moved_submenu_index
+    settings_widget:onReturn()
+    assert_eq(MenuOrderManager:getParentMenu("reader", "more_tools"), "setting",
+        "Updating the destination keeps the submenu in its new parent")
 end)
-assert_true(ok, "Cross-menu movement applied cleanly: " .. tostring(err))
+assert_true(ok, "Cross-menu editor state stayed synchronized: " .. tostring(err))
 
 -- 7. Test Hidden Items Manager Simulation
 print("\n--- Test 7: Hidden Items Manager Simulation ---")

@@ -180,12 +180,19 @@ end
 -- newly registered plugin items in their live KOReader order. Missing entries
 -- are returned separately so saving another change does not destroy data for a
 -- feature that may only be temporarily unavailable on this device/document.
-function UIScreens:_mergeConfiguredAndLiveItems(configured_items, hidden_items, live_ids, has_live_menu)
+function UIScreens:_mergeConfiguredAndLiveItems(
+        configured_items, hidden_items, live_ids, has_live_menu, recent_moves, menu_id)
     local hidden = {}
     for _, id in ipairs(hidden_items or {}) do hidden[id] = true end
 
     local live = {}
-    for _, id in ipairs(live_ids or {}) do live[id] = true end
+    for _, id in ipairs(live_ids or {}) do
+        local moved_to = recent_moves and recent_moves[id]
+        -- Ignore a stale live copy left in the old menu after a move.
+        if not moved_to or moved_to == menu_id then
+            live[id] = true
+        end
+    end
 
     local merged = {}
     local seen = {}
@@ -195,7 +202,8 @@ function UIScreens:_mergeConfiguredAndLiveItems(configured_items, hidden_items, 
             table.insert(merged, id)
         elseif hidden[id] then
             -- Hidden entries are appended by the caller with their hidden state.
-        elseif not has_live_menu or live[id] then
+        elseif not has_live_menu or live[id]
+                or (recent_moves and recent_moves[id] == menu_id) then
             if not seen[id] then
                 table.insert(merged, id)
                 seen[id] = true
@@ -207,7 +215,9 @@ function UIScreens:_mergeConfiguredAndLiveItems(configured_items, hidden_items, 
 
     if has_live_menu then
         for _, id in ipairs(live_ids or {}) do
-            if not hidden[id] and not seen[id] then
+            local moved_to = recent_moves and recent_moves[id]
+            if (not moved_to or moved_to == menu_id)
+                    and not hidden[id] and not seen[id] then
                 table.insert(merged, id)
                 seen[id] = true
             end
@@ -548,10 +558,13 @@ function UIScreens:showItemSortWidget(plugin, view, menu_id, on_close_callback)
 
     local live_ids, live_items_by_id, has_live_menu = self:_getLiveMenuItems(plugin, menu_id)
     local items, unavailable_items = self:_mergeConfiguredAndLiveItems(
-        configured_items, hidden_for_menu, live_ids, has_live_menu
+        configured_items, hidden_for_menu, live_ids, has_live_menu,
+        MenuOrderManager:getRecentMoves(view), menu_id
     )
 
     local sort_widget
+    local getCurrentEditorOrder
+    local refreshEditorAfterMove
 
     local function create_sep_item()
         local this_entry
@@ -622,9 +635,17 @@ function UIScreens:showItemSortWidget(plugin, view, menu_id, on_close_callback)
                             text = _("Move to another menu…"),
                             callback = function()
                                 UIManager:close(dialog)
-                                self:showDestinationMenuChooser(plugin, view, this_id, menu_id, function()
-                                    if refresh_func then refresh_func() end
-                                end)
+                                self:showDestinationMenuChooser(
+                                    plugin, view, this_id, menu_id,
+                                    function(moved_item_id)
+                                        if refreshEditorAfterMove then
+                                            refreshEditorAfterMove(moved_item_id)
+                                        elseif refresh_func then
+                                            refresh_func()
+                                        end
+                                    end,
+                                    getCurrentEditorOrder and getCurrentEditorOrder() or nil
+                                )
                             end,
                         }
                     },
@@ -753,6 +774,41 @@ function UIScreens:showItemSortWidget(plugin, view, menu_id, on_close_callback)
         return new_list
     end
 
+    -- A cross-menu move is saved immediately. Include any pending drag, sort,
+    -- separator, or visibility changes from this editor in that same save so
+    -- opening the destination chooser cannot silently discard them.
+    getCurrentEditorOrder = function()
+        local source_items = (sort_widget and sort_widget.item_table) or sort_items
+        return buildPersistentOrder(source_items)
+    end
+
+    -- The SortWidget owns a separate UI model from MenuOrderManager. Merely
+    -- repainting it after a move leaves the old row and parent/index captured
+    -- in its callbacks; the next separator/sort/OK action can then put the item
+    -- back in its source menu. Remove it from the editor model and reset all
+    -- selection/paging state to the newly saved source menu instead.
+    refreshEditorAfterMove = function(moved_item_id)
+        if not sort_widget or not sort_widget.item_table then return end
+        for i = #sort_widget.item_table, 1, -1 do
+            if sort_widget.item_table[i].item_id == moved_item_id then
+                table.remove(sort_widget.item_table, i)
+            end
+        end
+        if #sort_widget.item_table == 0 then
+            table.insert(sort_widget.item_table, {
+                text = _("(No items in this menu)"),
+                item_id = "__empty_hint__",
+                checked_func = function() return true end,
+                callback = function() end,
+            })
+        end
+        sort_widget.orig_item_table = nil
+        sort_widget.marked = 0
+        sort_widget.pages = math.max(1, math.ceil(#sort_widget.item_table / sort_widget.items_per_page))
+        sort_widget.show_page = math.min(math.max(1, sort_widget.show_page), sort_widget.pages)
+        sort_widget:_populateItems()
+    end
+
     sort_widget = SortWidget:new{
         title = string.format("%s - %s", _("Reorder"), menu_title),
         item_table = sort_items,
@@ -821,9 +877,13 @@ function UIScreens:showItemSortWidget(plugin, view, menu_id, on_close_callback)
                     if this.marked > 0 and this.item_table[this.marked] then
                         local iid = this.item_table[this.marked].item_id
                         if iid and iid ~= MenuOrderManager.SEPARATOR_ID and iid ~= "__empty_hint__" then
-                            outer_self_item:showDestinationMenuChooser(plugin, view, iid, menu_id, function()
-                                this:_populateItems()
-                            end)
+                            outer_self_item:showDestinationMenuChooser(
+                                plugin, view, iid, menu_id,
+                                function(moved_item_id)
+                                    refreshEditorAfterMove(moved_item_id)
+                                end,
+                                getCurrentEditorOrder()
+                            )
                         else
                             UIManager:show(InfoMessage:new{ text = _("Select a regular item first (tap to mark).") })
                         end
@@ -1068,7 +1128,8 @@ end
 -- Destination Menu Chooser (Move item to another tab or submenu)
 -- =========================================================================
 
-function UIScreens:showDestinationMenuChooser(plugin, view, item_id, from_menu_id, on_moved_callback)
+function UIScreens:showDestinationMenuChooser(
+        plugin, view, item_id, from_menu_id, on_moved_callback, pending_source_order)
     if plugin then self.plugin = plugin end
     local all_menus = MenuOrderManager:getAllMenusAndSubmenus(view)
     local choices = {}
@@ -1084,8 +1145,20 @@ function UIScreens:showDestinationMenuChooser(plugin, view, item_id, from_menu_i
             table.insert(choices, {
                 text = string.format("%s%s", prefix, title),
                 callback = function()
+                    -- The open source editor may contain unsaved reordering or
+                    -- separators. Stage that exact model only when a destination
+                    -- is selected (not when the chooser is merely opened).
+                    local order = MenuOrderManager:loadOrder(view)
+                    local previous_source_order
+                    if pending_source_order then
+                        previous_source_order = util.tableDeepCopy(order[from_menu_id])
+                        order[from_menu_id] = util.tableDeepCopy(pending_source_order)
+                    end
                     local moved, err = MenuOrderManager:moveItemToMenu(view, item_id, from_menu_id, target_mid)
                     if not moved then
+                        if previous_source_order then
+                            order[from_menu_id] = previous_source_order
+                        end
                         UIManager:show(InfoMessage:new{
                             text = err or _("This item cannot be moved to that menu."),
                         })
@@ -1095,7 +1168,9 @@ function UIScreens:showDestinationMenuChooser(plugin, view, item_id, from_menu_i
                     UIManager:show(Notification:new{
                         text = string.format(_("Moved to %s."), title),
                     })
-                    if on_moved_callback then on_moved_callback() end
+                    if on_moved_callback then
+                        on_moved_callback(item_id, from_menu_id, target_mid)
+                    end
                 end,
             })
         end

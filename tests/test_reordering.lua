@@ -43,6 +43,18 @@ local function list_contains(items, expected)
     return false
 end
 
+local function count_menu_references(order, expected)
+    local count = 0
+    for menu_id, items in pairs(order or {}) do
+        if menu_id ~= "KOMenu:disabled" and type(items) == "table" then
+            for _, item in ipairs(items) do
+                if item == expected then count = count + 1 end
+            end
+        end
+    end
+    return count
+end
+
 print("=======================================================")
 print("=== KOReader Reordering Menus Plugin - Test Suite   ===")
 print("=======================================================")
@@ -236,6 +248,23 @@ assert_eq(MenuOrderManager:getParentMenu("reader", "new_plugin_fixture"), "setti
 assert_true(MenuOrderManager:moveItemToMenu(
     "reader", "new_plugin_fixture", "setting", "tools"
 ), "Configured new plugin item can be moved again")
+
+-- Repair duplicate parents left by versions whose stale editor model could
+-- save an item back into its source after it had already been moved.
+local duplicate_order = MenuOrderManager:loadOrder("reader")
+table.insert(duplicate_order.search, "statistics")
+assert_eq(count_menu_references(duplicate_order, "statistics"), 2,
+    "Legacy duplicate-parent fixture was created")
+assert_true(MenuOrderManager:moveItemToMenu("reader", "statistics", "tools", "search"),
+    "Moving to an already duplicated destination repairs the old state")
+assert_eq(count_menu_references(duplicate_order, "statistics"), 1,
+    "Cross-menu move leaves exactly one authoritative parent")
+assert_eq(MenuOrderManager:getParentMenu("reader", "statistics"), "search",
+    "Duplicate repair keeps the selected destination")
+assert_true(MenuOrderManager:moveItemToMenu("reader", "statistics", "search", "tools"),
+    "Repaired item can be moved normally afterward")
+assert_eq(MenuOrderManager:getRecentMoves("reader").statistics, "tools",
+    "Recent move state records the interface's authoritative location")
 
 -- -------------------------------------------------------------
 -- Suite 6: Hiding / Disabling Items
