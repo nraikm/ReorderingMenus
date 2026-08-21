@@ -342,8 +342,10 @@ function UIScreens:showTabReorderDialog(plugin, view, on_close_callback)
                     ok_callback = function()
                         MenuOrderManager:resetOrder(view)
                         if plugin and plugin.ui then MenuOrderManager:applyLiveReload(plugin.ui, view) end
-                        UIManager:close(this)
-                        outer_self_tab:showTabReorderDialog(plugin, view)
+                        UIManager:nextTick(function()
+                            outer_self_tab:showTabReorderDialog(plugin, view)
+                        end)
+                        this:onClose()
                     end,
                 })
             end,
@@ -373,8 +375,10 @@ function UIScreens:showTabReorderDialog(plugin, view, on_close_callback)
                             MenuOrderManager:applyLiveReload(plugin.ui, "reader")
                             MenuOrderManager:applyLiveReload(plugin.ui, "filemanager")
                         end
-                        UIManager:close(this)
-                        outer_self_tab:showTabReorderDialog(plugin, view)
+                        UIManager:nextTick(function()
+                            outer_self_tab:showTabReorderDialog(plugin, view)
+                        end)
+                        this:onClose()
                     end,
                 })
             end,
@@ -766,8 +770,10 @@ function UIScreens:showItemSortWidget(plugin, view, menu_id, on_close_callback)
                 local current_menu_items = buildOrderFromSortItems(this.item_table)
                 outer_self_item:showSubmenuPresetsMenu(plugin, view, menu_id, menu_title, function(preset_applied)
                     if preset_applied then
-                        UIManager:close(this)
-                        outer_self_item:showItemSortWidget(plugin, view, menu_id, on_close_callback)
+                        UIManager:nextTick(function()
+                            outer_self_item:showItemSortWidget(plugin, view, menu_id, on_close_callback)
+                        end)
+                        this:onClose()
                     end
                 end, current_menu_items)
             end,
@@ -778,8 +784,10 @@ function UIScreens:showItemSortWidget(plugin, view, menu_id, on_close_callback)
             callback = function()
                 UIManager:close(dialog)
                 outer_self_item:confirmResetSubmenu(plugin, view, menu_id, menu_title, function()
-                    UIManager:close(this)
-                    outer_self_item:showItemSortWidget(plugin, view, menu_id, on_close_callback)
+                    UIManager:nextTick(function()
+                        outer_self_item:showItemSortWidget(plugin, view, menu_id, on_close_callback)
+                    end)
+                    this:onClose()
                 end)
             end,
         }})
@@ -810,8 +818,10 @@ function UIScreens:showItemSortWidget(plugin, view, menu_id, on_close_callback)
                             MenuOrderManager:applyLiveReload(plugin.ui, "reader")
                             MenuOrderManager:applyLiveReload(plugin.ui, "filemanager")
                         end
-                        UIManager:close(this)
-                        outer_self_item:showTabReorderDialog(plugin, view)
+                        UIManager:nextTick(function()
+                            outer_self_item:showTabReorderDialog(plugin, view)
+                        end)
+                        this:onClose()
                     end,
                 })
             end,
