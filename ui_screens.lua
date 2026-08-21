@@ -116,7 +116,38 @@ end
 -- in sub_item_table or directly in the menu table itself.
 function UIScreens:_getLiveMenuItems(plugin, menu_id)
     local menu = plugin and plugin.ui and plugin.ui.menu
-    local tab_item_table = menu and menu.tab_item_table
+    local function getTabItemTable(active_menu)
+        if not active_menu then return nil end
+        if type(active_menu.tab_item_table) ~= "table"
+                and type(active_menu.setUpdateItemTable) == "function" then
+            pcall(active_menu.setUpdateItemTable, active_menu)
+        end
+        if type(active_menu.tab_item_table) == "table" then
+            return active_menu.tab_item_table
+        end
+    end
+
+    local tab_item_table = getTabItemTable(menu)
+    if type(tab_item_table) ~= "table" then
+        -- A plugin instance can retain an older UI/menu reference after
+        -- KOReader rebuilds the Reader or FileManager menu. The active base
+        -- window still owns the authoritative live menu tree.
+        for i = #(UIManager._window_stack or {}), 1, -1 do
+            local entry = UIManager._window_stack[i]
+            local widget = entry and (entry.widget or entry)
+            local candidates = {
+                widget or false,
+                widget and widget.ui or false,
+                widget and widget.show_parent or false,
+            }
+            for _, candidate in ipairs(candidates) do
+                local active_menu = candidate and candidate.menu
+                tab_item_table = getTabItemTable(active_menu)
+                if type(tab_item_table) == "table" then break end
+            end
+            if type(tab_item_table) == "table" then break end
+        end
+    end
     if type(tab_item_table) ~= "table" then
         return {}, {}, false
     end
@@ -637,9 +668,11 @@ function UIScreens:showItemSortWidget(plugin, view, menu_id, on_close_callback)
             table.insert(sort_items, create_sep_item())
         else
             local item_title = MenuTitles:getTitle(item_id, live_items_by_id)
-            local live_item = live_items_by_id[item_id]
+            -- Only KOReader order-table submenus are editable here. A plugin may
+            -- expose its own sub_item_table (for example HTTP Inspector), but
+            -- its internal arrangement is owned by that plugin and cannot be
+            -- safely persisted through KOReader's menu order.
             local is_submenu = MenuOrderManager:isSubmenu(view, item_id)
-                or live_item and type(live_item.sub_item_table) == "table"
             local display_text = string.format("%s%s", is_submenu and "[+] " or "", item_title)
             table.insert(sort_items, makeSortItem(item_id, is_submenu, display_text))
         end
@@ -654,9 +687,7 @@ function UIScreens:showItemSortWidget(plugin, view, menu_id, on_close_callback)
         if not already and not seen_hidden[hid] then
             seen_hidden[hid] = true
             local item_title = MenuTitles:getTitle(hid, live_items_by_id)
-            local live_item = live_items_by_id[hid]
             local is_submenu = MenuOrderManager:isSubmenu(view, hid)
-                or live_item and type(live_item.sub_item_table) == "table"
             local display_text = string.format("%s%s (%s)", is_submenu and "[+] " or "", item_title, _("hidden"))
             local this_id = hid
             table.insert(sort_items, {

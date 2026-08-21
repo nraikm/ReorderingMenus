@@ -112,6 +112,39 @@ local ok, err = pcall(function()
     assert_eq(#live_ids, 2, "All direct live menu children are collected")
     assert_eq(live_ids[2], "new_plugin_item", "New plugin item is collected in live order")
     assert_eq(live_by_id.new_plugin_item.text, "New plugin item", "Live plugin title remains available")
+    live_by_id.new_plugin_item.sub_item_table = {
+        { text = "Plugin-owned setting" },
+    }
+    assert_eq(MenuOrderManager:isSubmenu("reader", "new_plugin_item"), false,
+        "Plugin-owned internal menu is not treated as an editable ordered submenu")
+
+    local saved_stack_size = #UIManager._window_stack
+    table.insert(UIManager._window_stack, {
+        widget = {
+            menu = {
+                tab_item_table = fake_plugin.ui.menu.tab_item_table,
+            },
+        },
+    })
+    local stale_plugin = { ui = { menu = {} } }
+    local fallback_ids, _, fallback_live = UIScreens:_getLiveMenuItems(stale_plugin, "fixture_menu")
+    table.remove(UIManager._window_stack)
+    assert_eq(#UIManager._window_stack, saved_stack_size, "Live-menu fallback leaves the window stack unchanged")
+    assert_true(fallback_live, "Active KOReader window supplies live menu after a stale plugin reference")
+    assert_eq(fallback_ids[2], "new_plugin_item", "Active-window fallback still discovers new plugins")
+
+    local rebuilt_plugin = {
+        ui = {
+            menu = {
+                setUpdateItemTable = function(self)
+                    self.tab_item_table = fake_plugin.ui.menu.tab_item_table
+                end,
+            },
+        },
+    }
+    local rebuilt_ids, _, rebuilt_live = UIScreens:_getLiveMenuItems(rebuilt_plugin, "fixture_menu")
+    assert_true(rebuilt_live, "Missing live menu tree is rebuilt through KOReader's menu updater")
+    assert_eq(rebuilt_ids[2], "new_plugin_item", "Rebuilt live tree includes new plugin items")
 
     local merged, unavailable = UIScreens:_mergeConfiguredAndLiveItems(
         { "stale_item", "known_item", MenuOrderManager.SEPARATOR_ID },
